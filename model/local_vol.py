@@ -1,47 +1,7 @@
-# model/local_vol.py
-
 import numpy as np
 from scipy.stats import norm
 from typing import Callable
-
-
-def bs_call_price(
-    S0: float,
-    K: float,
-    T: float,
-    r: float,
-    q: float,
-    sigma: float,
-) -> float:
-    """
-    Black–Scholes European call price.
-
-    Parameters
-    ----------
-    S0    : float
-        Spot price.
-    K     : float
-        Strike.
-    T     : float
-        Time to expiry (in years).
-    r     : float
-        Risk‐free rate (continuous).
-    q     : float
-        Dividend yield (continuous).
-    sigma : float
-        Volatility.
-
-    Returns
-    -------
-    price : float
-        Call option price.
-    """
-    if T <= 0:
-        return max(S0 - K, 0.0)
-    sqrtT = np.sqrt(T)
-    d1 = (np.log(S0 / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * sqrtT)
-    d2 = d1 - sigma * sqrtT
-    return S0 * np.exp(-q * T) * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+from utils.financial import bs_call_price
 
 
 def dupire_local_vol(
