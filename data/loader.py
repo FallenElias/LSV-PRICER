@@ -8,17 +8,22 @@ def fetch_spot_history(
     end: str = None,
 ) -> pd.DataFrame:
     """
-    Download daily spot price history for given ticker.
+    Download daily spot price history for given ticker and clean columns.
 
     Parameters
     ----------
-    ticker : equity symbol, e.g. 'SPY'
-    start  : start date 'YYYY-MM-DD'
-    end    : end date 'YYYY-MM-DD' (defaults to today)
+    ticker : str
+        Equity symbol, e.g. 'SPY'
+    start : str
+        Start date 'YYYY-MM-DD'
+    end : str, optional
+        End date 'YYYY-MM-DD' (defaults to today)
 
     Returns
     -------
-    DataFrame with columns: ['Date','Open','High','Low','Close','Adj Close','Volume']
+    pd.DataFrame
+        DataFrame with columns:
+        ['date','Open','High','Low','Close','Volume']
     """
     df = yf.download(
         ticker,
@@ -28,7 +33,12 @@ def fetch_spot_history(
     )
     df = df.reset_index()
     df.rename(columns={"Date": "date"}, inplace=True)
-    return df
+    # flatten MultiIndex if present
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    # keep only needed columns
+    cols = ['date', 'Open', 'High', 'Low', 'Close', 'Volume']
+    return df.loc[:, cols]
 
 
 def fetch_option_quotes(
@@ -36,18 +46,18 @@ def fetch_option_quotes(
 ) -> pd.DataFrame:
     """
     Download option chain quotes for all expiries via yfinance.
-    Returns bid, ask, implied vol for each contract.
 
     Parameters
     ----------
-    ticker : equity symbol
+    ticker : str
+        Equity symbol
 
     Returns
     -------
-    DataFrame with columns: [
-        'contractSymbol','lastPrice','bid','ask','impliedVolatility',
-        'inTheMoney','contractSize','currency','type','strike','expiry'
-    ]
+    pd.DataFrame
+        DataFrame with columns:
+        ['contractSymbol','lastPrice','bid','ask','impliedVolatility',
+         'inTheMoney','contractSize','currency','type','strike','expiry']
     """
     tk = yf.Ticker(ticker)
     expiries = tk.options
@@ -66,7 +76,7 @@ def fetch_option_quotes(
     df_opts.rename(columns={'impliedVolatility': 'mid_iv'}, inplace=True)
     # mid price from bid/ask
     df_opts['mid_price'] = (df_opts['bid'] + df_opts['ask']) / 2
-    return df_opts
+    return df_opts[['strike', 'bid', 'ask', 'mid_price', 'mid_iv', 'expiry', 'type']]
 
 
 def clean_option_quotes(
@@ -79,21 +89,22 @@ def clean_option_quotes(
 
     Parameters
     ----------
-    df : raw option quotes DataFrame
-    min_volume : minimum volume threshold
-    iv_range : allowable implied volatility range
+    df : pd.DataFrame
+        Raw option quotes DataFrame
+    min_volume : int
+        Minimum volume threshold
+    iv_range : tuple
+        Allowable implied volatility range (low, high)
 
     Returns
     -------
-    Filtered DataFrame
+    pd.DataFrame
+        Filtered DataFrame with columns:
+        ['strike','bid','ask','mid_price','mid_iv','expiry','type']
     """
-    # drop NaNs
-    df = df.dropna(subset=['bid', 'ask', 'mid_iv'])
-    # volume filter if column exists
+    df = df.dropna(subset=['bid', 'ask', 'mid_price', 'mid_iv'])
     if 'volume' in df.columns:
         df = df[df['volume'] >= min_volume]
-    # implied vol range
     df = df[(df['mid_iv'] >= iv_range[0]) & (df['mid_iv'] <= iv_range[1])]
-    # bid<ask
     df = df[df['bid'] < df['ask']]
-    return df
+    return df[['strike', 'bid', 'ask', 'mid_price', 'mid_iv', 'expiry', 'type']]
