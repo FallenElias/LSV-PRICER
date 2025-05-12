@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from scipy.integrate import quad
 from scipy.optimize import minimize
 from typing import Dict
@@ -119,19 +120,25 @@ def heston_price(
     )
 
     def P(j: int) -> float:
-        # Integrand for Pj
-        def integrand(u):
-            # shift u by -(j-1)i
-            cf_val = _heston_cf(u - 1j*(j-1), S0, T, r, q,
-                                kappa, theta, xi, rho, v0)
-            numerator = np.exp(-1j * u * np.log(K)) * cf_val
-            return (numerator / (1j * u)).real
+        def integrand(u: float) -> float:
+            # 1) get the raw characteristic‐function value
+            raw = _heston_cf(u - 1j*(j-1), S0, T, r, q,
+                            kappa, theta, xi, rho, v0)
+            # 2) if it’s a pandas Series of length 1, extract its element
+            if isinstance(raw, pd.Series):
+                raw = raw.iloc[0]
+            # 3) now force to a built‐in complex
+            cf_val = complex(raw)
+
+            num = np.exp(-1j * u * np.log(K)) * cf_val
+            real_part = (num / (1j * u)).real
+            return float(real_part)
 
         integral, _ = quad(integrand, 0.0, np.inf, limit=200)
-        return 0.5 + (1.0/np.pi) * integral
+        return 0.5 + (1.0 / np.pi) * integral
 
-    P1, P2 = P(1), P(2)
-    # Construct call price
+    P1 = P(1)
+    P2 = P(2)
     return S0 * np.exp(-q * T) * P1 - K * np.exp(-r * T) * P2
 
 

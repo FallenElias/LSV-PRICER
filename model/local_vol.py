@@ -51,6 +51,7 @@ def dupire_local_vol(
     for i, T in enumerate(Ts):
         for j, K in enumerate(Ks):
             vol = iv_func(K, T)
+            vol = float(vol)  
             C[i, j] = bs_call_price(S0, K, T, r, q, vol)
 
     # 2. forward‐measure adjustment
