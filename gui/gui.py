@@ -67,48 +67,115 @@ class LSVPricerGUI(tk.Tk):
             messagebox.showerror("Error", str(e))
 
     def _on_calibrate(self):
-        # build IV grid
-        strikes = np.sort(self.opts["strike"].unique())
-        exps    = np.sort(self.opts["expiry"].dt.year + self.opts["expiry"].dt.dayofyear/365)
-        # form mid_iv matrix...
-        iv_mat  = np.zeros((len(exps), len(strikes)))
-        for i,T in enumerate(exps):
-            row = self.opts[self.opts["expiry"].dt.year + self.opts["expiry"].dt.dayofyear/365 == T]
-            iv_mat[i,:] = [row[row["strike"]==K]["mid_iv"].mean() for K in strikes]
-        self.iv_func = fit_iv_surface(strikes, exps, iv_mat)
-        # local vol
+        """
+        Build IV surface, local vol, calibrate Heston, and build leverage function.
+        """
+        # spot price and date
+        spot_date = self.spot["date"].iloc[-1]
         S0 = self.spot["Close"].iloc[-1]
-        self.sigma_loc = dupire_local_vol(S0, strikes, exps, self.iv_func)
-        # Heston calib
-        calib = calibrate_heston(strikes, exps, iv_mat, S0, r=0.0, q=0.0)
-        # leverage
-        times = exps
-        S_h, v_h = simulate_heston(S0, calib["v0"], **calib, r=0.0, q=0.0, maturities=times, n_steps=len(times)-1, n_paths=10000)
-        cond_var = estimate_conditional_variance(S_h, v_h, strikes, T_index=-1)
-        self.L_func = build_leverage_function(strikes, exps, self.sigma_loc, np.tile(cond_var,(len(exps),1)))
-        messagebox.showinfo("Calibrate", "Heston and leverage built")
+
+        # compute time-to-expiry in years, unique & sorted
+        exp_days = (self.opts["expiry"] - spot_date).dt.days
+        self.times = np.unique(exp_days / 365.0)
+
+        # strike grid
+        strikes = np.sort(self.opts["strike"].unique())
+
+        # build mid-IV matrix on (len(times), len(strikes))
+        iv_mat = np.zeros((len(self.times), len(strikes)))
+        for i, T in enumerate(self.times):
+            mask = np.isclose(exp_days / 365.0, T)
+            slice_df = self.opts[mask]
+            for j, K in enumerate(strikes):
+                iv_mat[i, j] = slice_df.loc[slice_df["strike"] == K, "mid_iv"].mean()
+
+        # 1) fit implied-vol surface
+        self.iv_func = fit_iv_surface(strikes, self.times, iv_mat)
+
+        # 2) extract local volatility
+        self.sigma_loc = dupire_local_vol(S0, strikes, self.times, self.iv_func, r=0.0, q=0.0)
+
+        # 3) calibrate Heston backbone
+        calib = calibrate_heston(strikes, self.times, iv_mat, S0, r=0.0, q=0.0)
+        self.heston_params = calib
+
+        # 4) simulate pure-Heston for conditional variance
+        S_h, v_h = simulate_heston(
+            S0,
+            calib["v0"],
+            calib["kappa"], calib["theta"], calib["xi"], calib["rho"],
+            r=0.0, q=0.0,
+            maturities=self.times,
+            n_steps=len(self.times) - 1,
+            n_paths=10000
+        )
+        cond_var = estimate_conditional_variance(S_h, v_h, strikes, T_index=-1, bandwidth=1.0)
+
+        # 5) build leverage L(K,T)
+        cond_grid = np.tile(cond_var, (len(self.times), 1))
+        self.L_func = build_leverage_function(strikes, self.times, self.sigma_loc, cond_grid)
+
+        messagebox.showinfo("Calibrate", "Calibration and leverage build complete")
 
     def _on_simulate(self):
+        """
+        Run the LSV Monte-Carlo using self.L_func and self.heston_params.
+        Plot the first 20 simulated paths.
+        """
+        if not hasattr(self, "L_func") or not hasattr(self, "heston_params"):
+            messagebox.showwarning("Error", "Please click ‘Calibrate & Build L’ first")
+            return
+
         S0 = self.spot["Close"].iloc[-1]
-        calib = self.L_func  # not needed
-        self.S_paths, _ = simulate_lsv(S0, calib["v0"], self.L_func, calib, r=0.0, q=0.0, T=1.0, n_steps=100, n_paths=5000)
+        params = self.heston_params
+        T_final = self.times[-1]
+
+        # simulate LSV
+        self.S_paths, self.v_paths = simulate_lsv(
+            S0,
+            params["v0"],
+            self.L_func,
+            params,
+            r=0.0,
+            q=0.0,
+            T=T_final,
+            n_steps=100,
+            n_paths=5000
+        )
+
+        # plot sample paths
         self.ax.clear()
-        for i in range(20):
-            self.ax.plot(self.S_paths[i], linewidth=0.6)
+        t_grid = np.linspace(0, T_final, 100 + 1)
+        for path in self.S_paths[:20]:
+            self.ax.plot(t_grid, path, linewidth=0.6)
         self.canvas.draw()
 
     def _on_price(self):
-        prod = self.prod_cb.get()
-        K = float(self.strike.get())
-        disc = np.exp(-0.0 * 1.0)
+        """
+        Price the selected derivative on self.S_paths.
+        """
+        if not hasattr(self, "S_paths"):
+            messagebox.showwarning("Error", "Please run ‘Run Simulation’ first")
+            return
+
+        prod  = self.prod_cb.get()
+        K     = float(self.strike.get())
+        T     = self.times[-1]
+        discount = np.exp(-0.0 * T)
+
         if prod == "European":
-            p = european_price_mc(lambda ST: np.maximum(ST-K,0), self.S_paths, disc)
+            price = european_price_mc(lambda ST: np.maximum(ST - K, 0.0),
+                                     self.S_paths, discount)
         elif prod == "Barrier":
             B = float(self.barrier.get())
-            p = barrier_price_mc(self.S_paths, K, B, is_up=True, is_call=True, discount=disc)
-        else:
-            p = asian_price_mc(self.S_paths, K, is_call=True, discount=disc)
-        self.result_var.set(f"Price: {p:.4f}")
+            price = barrier_price_mc(self.S_paths, K, B,
+                                     is_up=True, is_call=True,
+                                     discount=discount)
+        else:  # Asian
+            price = asian_price_mc(self.S_paths, K,
+                                   is_call=True, discount=discount)
+
+        self.result_var.set(f"Price: {price:.4f}")
 
 if __name__ == "__main__":
     app = LSVPricerGUI()
