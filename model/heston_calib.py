@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import multiprocessing as mp
 from scipy.integrate import quad
 from scipy.optimize import minimize
 from typing import Dict
@@ -141,6 +142,10 @@ def heston_price(
     P2 = P(2)
     return S0 * np.exp(-q * T) * P1 - K * np.exp(-r * T) * P2
 
+def _model_iv_point(args):
+    K, T, S0, r, q, params = args
+    price = heston_price(K, T, S0, r, q, params)
+    return bs_implied_vol(S0, K, T, r, q, price)
 
 def calibrate_heston(
     strikes: np.ndarray,
@@ -190,11 +195,12 @@ def calibrate_heston(
     calibrated : dict
         Optimized parameters with keys 'kappa','theta','xi','rho','v0'.
     """
-    # Flatten the grids for vectorized objective
+    # Build flat arrays for K, T and target IV
     Ks, Ts = np.meshgrid(strikes, maturities)
+    Ks_flat = Ks.ravel()
+    Ts_flat = Ts.ravel()
     target_iv = market_iv.ravel()
 
-    # Default starting point if none provided
     if initial_guess is None:
         initial_guess = {
             'kappa': 1.0,
@@ -204,28 +210,27 @@ def calibrate_heston(
             'v0': 0.04,
         }
     x0 = np.array(list(initial_guess.values()))
-
-    # Reasonable bounds for each parameter
     bounds = [
-        (1e-3, 10.0),     # kappa > 0
-        (1e-4, 2.0),      # theta ≥ 0
-        (1e-4, 5.0),      # xi ≥ 0
-        (-0.999, 0.999),  # |rho| < 1
-        (1e-4, 2.0),      # v0 ≥ 0
+        (1e-3, 10.0),    # kappa
+        (1e-4, 2.0),     # theta
+        (1e-4, 5.0),     # xi
+        (-0.999, 0.999), # rho
+        (1e-4, 2.0),     # v0
     ]
+    param_names = list(initial_guess.keys())
 
     def objective(x):
-        # Map optimizer vector back to named params
-        params = dict(zip(initial_guess.keys(), x))
-        errors = []
-        for (K, T, iv_mkt) in zip(Ks.ravel(), Ts.ravel(), target_iv):
-            # Price under Heston
-            price = heston_price(K, T, S0, r, q, params)
-            # Convert to implied vol
-            iv_mod = bs_implied_vol(S0, K, T, r, q, price)
-            errors.append((iv_mod - iv_mkt)**2)
-        return np.sum(errors)
+        params = dict(zip(param_names, x))
+        # prepare args list once per objective call
+        args_list = [
+            (K, T, S0, r, q, params)
+            for K, T in zip(Ks_flat, Ts_flat)
+        ]
+        # parallel map
+        with mp.Pool(mp.cpu_count()) as pool:
+            iv_mod = pool.map(_model_iv_point, args_list)
+        errs = (np.array(iv_mod) - target_iv) ** 2
+        return float(errs.sum())
 
     result = minimize(objective, x0, bounds=bounds, method="L-BFGS-B")
-    # Return the fitted parameters
-    return dict(zip(initial_guess.keys(), result.x))
+    return dict(zip(param_names, result.x))

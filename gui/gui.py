@@ -10,7 +10,7 @@ from model.surface         import fit_iv_surface
 from model.local_vol       import dupire_local_vol
 from model.heston_calib    import calibrate_heston
 from model.leverage        import simulate_heston, estimate_conditional_variance, build_leverage_function
-from model.mc_engine       import simulate_lsv
+from model.mc_engine import simulate_lsv_parallel as simulate_lsv
 from pricing.pricing       import european_price_mc, barrier_price_mc, asian_price_mc
 
 class LSVPricerGUI(tk.Tk):

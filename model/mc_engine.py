@@ -1,6 +1,6 @@
-
 import numpy as np
 from typing import Callable, Dict, Tuple
+import multiprocessing as mp
 
 
 def simulate_lsv(
@@ -84,3 +84,23 @@ def simulate_lsv(
         v[:, t + 1] = v_next
 
     return S, v
+
+
+def simulate_lsv_parallel(
+    S0, v0, leverage_func, heston_params,
+    r, q, T, n_steps, n_paths
+):
+    """
+    Split the total paths across all CPU cores.
+    """
+    cpus = mp.cpu_count()
+    chunk = n_paths // cpus
+    args = [
+        (S0, v0, leverage_func, heston_params, r, q, T, n_steps, chunk)
+        for _ in range(cpus)
+    ]
+    with mp.Pool(cpus) as pool:
+        results = pool.starmap(simulate_lsv, args)
+    S_parts = [res[0] for res in results]
+    v_parts = [res[1] for res in results]
+    return np.vstack(S_parts), np.vstack(v_parts)
