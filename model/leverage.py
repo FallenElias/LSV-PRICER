@@ -76,38 +76,32 @@ def build_leverage_function(
     cond_var: np.ndarray,
 ) -> Callable[[float, float], float]:
     """
-    Build L(K,T) = σ_loc(K,T) / sqrt(cond_var(K,T)) as a bilinear spline.
+    Build L(K,T) = σ_loc(K,T) / sqrt(cond_var(K,T)).
 
-    Parameters
-    ----------
-    strikes     : 1D array, shape (M,)
-        Strike grid, sorted.
-    maturities  : 1D array, shape (N,)
-        Maturity grid, sorted.
-    local_vol   : 2D array, shape (N, M)
-        σ_loc at each (T_i,K_j).
-    cond_var    : 2D array, shape (N, M)
-        E[v_T | S_T=K] at each (T_i,K_j).
-
-    Returns
-    -------
-    L_func : callable
-        L_func(K_query, T_query) → leverage L.
+    If the grid is too small to fit a spline (e.g. 1×1), return a constant L.
     """
     # compute raw leverage surface
-    # avoid division by zero or NaN
-    L = np.where(cond_var > 0, local_vol / np.sqrt(cond_var), np.nan)
+    Lgrid = np.where(cond_var > 0, local_vol / np.sqrt(cond_var), np.nan)
 
-    # mask NaNs so spline ignores them
-    mask = ~np.isnan(L)
-    T_valid, K_valid = np.meshgrid(maturities, strikes, indexing='xy')
-    x = maturities[np.any(mask, axis=1)]
-    y = strikes[np.any(mask, axis=0)]
-    z = L[np.ix_(np.any(mask, axis=1), np.any(mask, axis=0))]
+    # if only one valid point, return constant function
+    if strikes.size < 2 or maturities.size < 2:
+        # find first non-nan
+        idx = np.argwhere(~np.isnan(Lgrid))
+        if idx.size == 0:
+            constL = np.nan
+        else:
+            i, j = idx[0]
+            constL = float(Lgrid[i, j])
+        return lambda K, T: constL
 
-    # build 2D bilinear spline (kx=1, ky=1)
-    spline = RectBivariateSpline(x, y, z, kx=1, ky=1)
+    # mask NaNs
+    mask = ~np.isnan(Lgrid)
+    # valid maturities/strikes
+    T_valid = maturities[np.any(mask, axis=1)]
+    K_valid = strikes[np.any(mask, axis=0)]
+    Z = Lgrid[np.ix_(np.any(mask, axis=1), np.any(mask, axis=0))]
 
-    def L_func(K: float, T: float) -> float:
-        return float(spline(T, K))
-    return L_func
+    # bilinear spline
+    spline = RectBivariateSpline(T_valid, K_valid, Z, kx=1, ky=1)
+
+    return lambda K, T: float(spline(T, K))
