@@ -59,7 +59,7 @@ class LSVPricerGUI(tk.Tk):
     def _on_fetch(self):
         tk = self.ticker.get().upper()
         try:
-            self.spot = fetch_spot_history(tk)
+            self.spot = fetch_spot_history(tk, years= 3)
             opts = fetch_option_quotes(tk)
             self.opts = clean_option_quotes(opts)
             messagebox.showinfo("Data", f"Loaded {len(self.spot)} spot rows and {len(self.opts)} options")
@@ -176,6 +176,7 @@ class LSVPricerGUI(tk.Tk):
                                    is_call=True, discount=discount)
 
         self.result_var.set(f"Price: {price:.4f}")
+
 
 if __name__ == "__main__":
     app = LSVPricerGUI()

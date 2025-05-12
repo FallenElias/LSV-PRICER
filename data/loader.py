@@ -1,45 +1,38 @@
 import pandas as pd
 import yfinance as yf
+import datetime as dt
 
 
 def fetch_spot_history(
     ticker: str,
-    start: str = "2000-01-01",
-    end: str = None,
+    years: int = 3,
 ) -> pd.DataFrame:
     """
-    Download daily spot price history for given ticker and clean columns.
+    Download the last N years of daily closing prices for `ticker`.
 
     Parameters
     ----------
     ticker : str
-        Equity symbol, e.g. 'SPY'
-    start : str
-        Start date 'YYYY-MM-DD'
-    end : str, optional
-        End date 'YYYY-MM-DD' (defaults to today)
+        Equity symbol, e.g., 'AAPL'
+    years  : int
+        Number of years of history to fetch (default 3).
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns:
-        ['date','Open','High','Low','Close','Volume']
+        DataFrame with columns ['date','Close']
     """
+    end   = dt.date.today()
+    start = end - dt.timedelta(days=years * 365)
     df = yf.download(
         ticker,
-        start=start,
-        end=end or pd.Timestamp.today().strftime("%Y-%m-%d"),
-        progress=False
+        start=start.isoformat(),
+        end=end.isoformat(),
+        progress=False,
+        auto_adjust=False,  # preserves raw Close
     )
-    df = df.reset_index()
-    df.rename(columns={"Date": "date"}, inplace=True)
-    # flatten MultiIndex if present
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    # keep only needed columns
-    cols = ['date', 'Open', 'High', 'Low', 'Close', 'Volume']
-    return df.loc[:, cols]
-
+    df = df.reset_index()[['Date', 'Close']].rename(columns={'Date': 'date'})
+    return df
 
 def fetch_option_quotes(
     ticker: str,
