@@ -109,3 +109,7 @@ class LSVPricerGUI(tk.Tk):
         else:
             p = asian_price_mc(self.S_paths, K, is_call=True, discount=disc)
         self.result_var.set(f"Price: {p:.4f}")
+
+if __name__ == "__main__":
+    app = LSVPricerGUI()
+    app.mainloop()
