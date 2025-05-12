@@ -4,7 +4,74 @@ import multiprocessing as mp
 from scipy.integrate import quad
 from scipy.optimize import minimize
 from typing import Dict
-from utils.financial import bs_implied_vol  # your BS‐IV solver
+from utils.financial import bs_implied_vol  
+from numba import njit, complex128, float64
+
+_CALIB_POOL = mp.Pool(mp.cpu_count())
+
+
+import numpy as np
+from numba import njit, float64, complex128
+
+# 10 floats → complex128
+@njit(complex128(float64,   # u
+                 float64,   # lnS0
+                 float64,   # T
+                 float64,   # r
+                 float64,   # q
+                 float64,   # kappa
+                 float64,   # theta
+                 float64,   # xi
+                 float64,   # rho
+                 float64))  # v0
+def _heston_cf_numba(u, lnS0, T, r, q, kappa, theta, xi, rho, v0):
+    # characteristic function φ(u) under “little‐Heston‐Trap”
+    iu = 1j * u
+    d  = np.sqrt((rho*xi*iu - kappa)**2
+                 + xi*xi * (u*u + iu))
+    g  = (kappa - rho*xi*iu - d) / (kappa - rho*xi*iu + d)
+    exp_dT = np.exp(-d * T)
+    # C‐term
+    C = (r - q)*iu*T \
+        + (theta*kappa/(xi*xi)) * (
+            (kappa - rho*xi*iu - d)*T
+            - 2.0 * np.log((1.0 - g*exp_dT)/(1.0 - g))
+          )
+    # D‐term
+    D = ((kappa - rho*xi*iu - d)/(xi*xi)) * (
+            (1.0 - exp_dT)/(1.0 - g*exp_dT)
+        )
+    return np.exp(C + D*v0 + iu * lnS0)
+
+# float64 outputs for P1 integrand
+@njit(float64(float64,   # u
+              float64,   # lnK
+              float64,   # lnS0
+              float64,   # T
+              float64,   # r
+              float64,   # q
+              float64,   # kappa
+              float64,   # theta
+              float64,   # xi
+              float64,   # rho
+              float64))  # v0
+def _integrand_numba_P1(u, lnK, lnS0, T, r, q, kappa, theta, xi, rho, v0):
+    # φ(u) (j=1 ⇒ shift=0)
+    cf = _heston_cf_numba(u, lnS0, T, r, q, kappa, theta, xi, rho, v0)
+    num = np.exp(-1j*u*lnK) * cf
+    return (num/(1j*u)).real
+
+# float64 outputs for P2 integrand
+@njit(float64(float64, float64, float64,
+              float64, float64, float64,
+              float64, float64, float64,
+              float64, float64))
+def _integrand_numba_P2(u, lnK, lnS0, T, r, q, kappa, theta, xi, rho, v0):
+    # φ(u - i) (j=2 ⇒ shift=1)
+    cf = _heston_cf_numba(u - 1.0j, lnS0, T, r, q, kappa, theta, xi, rho, v0)
+    num = np.exp(-1j*u*lnK) * cf
+    return (num/(1j*u)).real
+
 
 
 def _heston_cf(
@@ -121,22 +188,20 @@ def heston_price(
     )
 
     def P(j: int) -> float:
-        def integrand(u: float) -> float:
-            # 1) get the raw characteristic‐function value
-            raw = _heston_cf(u - 1j*(j-1), S0, T, r, q,
-                            kappa, theta, xi, rho, v0)
-            # 2) if it’s a pandas Series of length 1, extract its element
-            if isinstance(raw, pd.Series):
-                raw = raw.iloc[0]
-            # 3) now force to a built‐in complex
-            cf_val = complex(raw)
+        lnK  = np.log(K)
+        lnS0 = np.log(S0)
+        if j == 1:
+            integr = lambda u: float(_integrand_numba_P1(
+                u, lnK, lnS0, T, r, q, kappa, theta, xi, rho, v0
+            ))
+        else:  # j == 2
+            integr = lambda u: float(_integrand_numba_P2(
+                u, lnK, lnS0, T, r, q, kappa, theta, xi, rho, v0
+            ))
 
-            num = np.exp(-1j * u * np.log(K)) * cf_val
-            real_part = (num / (1j * u)).real
-            return float(real_part)
+        integral, _ = quad(integr, 0.0, np.inf, limit=50)
+        return 0.5 + (1.0/np.pi) * integral
 
-        integral, _ = quad(integrand, 0.0, np.inf, limit=200)
-        return 0.5 + (1.0 / np.pi) * integral
 
     P1 = P(1)
     P2 = P(2)
@@ -227,8 +292,7 @@ def calibrate_heston(
             for K, T in zip(Ks_flat, Ts_flat)
         ]
         # parallel map
-        with mp.Pool(mp.cpu_count()) as pool:
-            iv_mod = pool.map(_model_iv_point, args_list)
+        iv_mod = _CALIB_POOL.map(_model_iv_point, args_list)
         errs = (np.array(iv_mod) - target_iv) ** 2
         return float(errs.sum())
 

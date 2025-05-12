@@ -3,6 +3,9 @@ from tkinter import ttk, messagebox
 import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import threading
+import time
+
 
 # backend modules
 from data.loader           import fetch_spot_history, fetch_option_quotes, clean_option_quotes
@@ -19,36 +22,50 @@ class LSVPricerGUI(tk.Tk):
         self.title("LSV Pricer")
         self._build_controls()
         self._build_plot_area()
-
+        
     def _build_controls(self):
-        frm = ttk.Frame(self); frm.pack(side="left", fill="y", padx=10, pady=10)
+        frm = ttk.Frame(self)
+        frm.pack(side="left", fill="y", padx=10, pady=10)
 
         # Ticker entry
         ttk.Label(frm, text="Ticker").grid(row=0, column=0, sticky="w")
-        self.ticker = ttk.Entry(frm); self.ticker.grid(row=0, column=1)
+        self.ticker = ttk.Entry(frm)
+        self.ticker.grid(row=0, column=1)
 
         # Derivative type
         ttk.Label(frm, text="Product").grid(row=1, column=0, sticky="w")
-        self.prod_cb = ttk.Combobox(frm, values=["European","Barrier","Asian"])
-        self.prod_cb.current(0); self.prod_cb.grid(row=1, column=1)
+        self.prod_cb = ttk.Combobox(frm, values=["European", "Barrier", "Asian"])
+        self.prod_cb.current(0)
+        self.prod_cb.grid(row=1, column=1)
 
         # Strike
         ttk.Label(frm, text="Strike").grid(row=2, column=0, sticky="w")
-        self.strike = ttk.Entry(frm); self.strike.grid(row=2, column=1)
+        self.strike = ttk.Entry(frm)
+        self.strike.grid(row=2, column=1)
 
         # Barrier (only if Barrier)
         ttk.Label(frm, text="Barrier").grid(row=3, column=0, sticky="w")
-        self.barrier = ttk.Entry(frm); self.barrier.grid(row=3, column=1)
+        self.barrier = ttk.Entry(frm)
+        self.barrier.grid(row=3, column=1)
 
         # Buttons
-        ttk.Button(frm, text="Fetch & Clean Data", command=self._on_fetch).grid(row=4, column=0, columnspan=2, pady=5)
-        ttk.Button(frm, text="Calibrate & Build L", command=self._on_calibrate).grid(row=5, column=0, columnspan=2, pady=5)
-        ttk.Button(frm, text="Run Simulation", command=self._on_simulate).grid(row=6, column=0, columnspan=2, pady=5)
-        ttk.Button(frm, text="Price", command=self._on_price).grid(row=7, column=0, columnspan=2, pady=5)
+        self.fetch_btn = ttk.Button(frm, text="Fetch & Clean Data", command=self._on_fetch)
+        self.fetch_btn.grid(row=4, column=0, columnspan=2, pady=5)
+
+        self.calib_btn = ttk.Button(frm, text="Calibrate & Build L", command=self._on_calibrate)
+        self.calib_btn.grid(row=5, column=0, columnspan=2, pady=5)
+
+        self.sim_btn = ttk.Button(frm, text="Run Simulation", command=self._on_simulate)
+        self.sim_btn.grid(row=6, column=0, columnspan=2, pady=5)
+
+        self.price_btn = ttk.Button(frm, text="Price", command=self._on_price)
+        self.price_btn.grid(row=7, column=0, columnspan=2, pady=5)
 
         # Result display
         self.result_var = tk.StringVar()
-        ttk.Label(frm, textvariable=self.result_var, foreground="blue").grid(row=8, column=0, columnspan=2, pady=10)
+        ttk.Label(frm, textvariable=self.result_var, foreground="blue") \
+            .grid(row=8, column=0, columnspan=2, pady=10)
+
 
     def _build_plot_area(self):
         fig = Figure(figsize=(6,4))
@@ -65,58 +82,99 @@ class LSVPricerGUI(tk.Tk):
             messagebox.showinfo("Data", f"Loaded {len(self.spot)} spot rows and {len(self.opts)} options")
         except Exception as e:
             messagebox.showerror("Error", str(e))
-
+            
     def _on_calibrate(self):
         """
-        Build IV surface, local vol, calibrate Heston, and build leverage function.
+        Kick off background calibration + leverage build with a live timer.
         """
-        # spot price and date
+        # disable UI controls
+        self.fetch_btn.config(state="disabled")
+        self.calib_btn.config(state="disabled")
+
+        # prepare inputs
         spot_date = self.spot["date"].iloc[-1]
-        S0 = self.spot["Close"].iloc[-1]
+        S0        = self.spot["Close"].iloc[-1]
+        exp_days  = (self.opts["expiry"] - spot_date).dt.days
+        times     = np.unique(exp_days / 365.0)
+        strikes   = np.sort(self.opts["strike"].unique())
 
-        # compute time-to-expiry in years, unique & sorted
-        exp_days = (self.opts["expiry"] - spot_date).dt.days
-        self.times = np.unique(exp_days / 365.0)
-
-        # strike grid
-        strikes = np.sort(self.opts["strike"].unique())
-
-        # build mid-IV matrix on (len(times), len(strikes))
-        iv_mat = np.zeros((len(self.times), len(strikes)))
-        for i, T in enumerate(self.times):
+        iv_mat = np.zeros((len(times), len(strikes)))
+        for i, T in enumerate(times):
             mask = np.isclose(exp_days / 365.0, T)
             slice_df = self.opts[mask]
             for j, K in enumerate(strikes):
                 iv_mat[i, j] = slice_df.loc[slice_df["strike"] == K, "mid_iv"].mean()
 
-        # 1) fit implied-vol surface
-        self.iv_func = fit_iv_surface(strikes, self.times, iv_mat)
+        # store for background task
+        self._calib_inputs = (strikes, times, iv_mat, S0)
 
-        # 2) extract local volatility
-        self.sigma_loc = dupire_local_vol(S0, strikes, self.times, self.iv_func, r=0.0, q=0.0)
+        # start timer display
+        self._calib_start = time.perf_counter()
+        self.result_var.set("Calibrating… 0s elapsed")
+        self._timer_id = self.after(1000, self._update_timer)
 
-        # 3) calibrate Heston backbone
-        calib = calibrate_heston(strikes, self.times, iv_mat, S0, r=0.0, q=0.0)
+        # launch background thread
+        thread = threading.Thread(target=self._calibrate_task, daemon=True)
+        thread.start()
+        
+    def _update_timer(self):
+        """Update elapsed-time every second."""
+        elapsed = int(time.perf_counter() - self._calib_start)
+        self.result_var.set(f"Calibrating… {elapsed}s elapsed")
+        self._timer_id = self.after(1000, self._update_timer)
+
+    def _calibrate_task(self):
+        """
+        Runs in background. Does calibration, simulate-Heston, leverage build.
+        On completion, schedules _calibrate_done on the main thread.
+        """
+        strikes, times, iv_mat, S0 = self._calib_inputs
+        try:
+            # 1) fit IV surface & local vol
+            self.iv_func   = fit_iv_surface(strikes, times, iv_mat)
+            self.sigma_loc = dupire_local_vol(S0, strikes, times, self.iv_func, r=0.0, q=0.0)
+
+            # 2) calibrate Heston
+            calib = calibrate_heston(strikes, times, iv_mat, S0, r=0.0, q=0.0)
+
+            # 3) simulate pure-Heston & estimate cond. var.
+            S_h, v_h = simulate_heston(
+                S0, calib["v0"],
+                calib["kappa"], calib["theta"], calib["xi"], calib["rho"],
+                r=0.0, q=0.0,
+                maturities=times,
+                n_steps=len(times)-1,
+                n_paths=10000
+            )
+            cond_var = estimate_conditional_variance(S_h, v_h, strikes, T_index=-1, bandwidth=1.0)
+
+            # 4) build leverage
+            cond_grid = np.tile(cond_var, (len(times), 1))
+            Lf = build_leverage_function(strikes, times, self.sigma_loc, cond_grid)
+
+            # signal completion on main thread
+            self.after(0, lambda: self._calibrate_done(calib, Lf))
+
+        except Exception as e:
+            self.after(0, lambda: messagebox.showerror("Calibration Error", str(e)))
+
+    def _calibrate_done(self, calib, Lf):
+        """
+        Called on main thread when calibration + leverage build finishes.
+        """
+        # stop timer
+        self.after_cancel(self._timer_id)
+        self.result_var.set("Calibration complete")
+
+        # store results
         self.heston_params = calib
+        self.L_func         = Lf
 
-        # 4) simulate pure-Heston for conditional variance
-        S_h, v_h = simulate_heston(
-            S0,
-            calib["v0"],
-            calib["kappa"], calib["theta"], calib["xi"], calib["rho"],
-            r=0.0, q=0.0,
-            maturities=self.times,
-            n_steps=len(self.times) - 1,
-            n_paths=10000
-        )
-        cond_var = estimate_conditional_variance(S_h, v_h, strikes, T_index=-1, bandwidth=1.0)
+        # re-enable buttons
+        self.fetch_btn.config(state="normal")
+        self.calib_btn.config(state="normal")
 
-        # 5) build leverage L(K,T)
-        cond_grid = np.tile(cond_var, (len(self.times), 1))
-        self.L_func = build_leverage_function(strikes, self.times, self.sigma_loc, cond_grid)
-
-        messagebox.showinfo("Calibrate", "Calibration and leverage build complete")
-
+    
     def _on_simulate(self):
         """
         Run the LSV Monte-Carlo using self.L_func and self.heston_params.
