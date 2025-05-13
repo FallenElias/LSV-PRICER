@@ -156,7 +156,7 @@ class LSVPricerGUI(tk.Tk):
             self.after(0, lambda: self._calibrate_done(calib, Lf))
 
         except Exception as e:
-            self.after(0, lambda: messagebox.showerror("Calibration Error", str(e)))
+            self.after(0, lambda err=e: messagebox.showerror("Calibration Error", str(err)))
 
     def _calibrate_done(self, calib, Lf):
         """

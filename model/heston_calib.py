@@ -6,45 +6,36 @@ from scipy.optimize import minimize
 from typing import Dict
 from utils.financial import bs_implied_vol  
 from numba import njit, complex128, float64
+from scipy.integrate import quad
 
-_CALIB_POOL = mp.Pool(mp.cpu_count())
 
 
-import numpy as np
-from numba import njit, float64, complex128
 
-# 10 floats → complex128
-@njit(complex128(float64,   # u
-                 float64,   # lnS0
-                 float64,   # T
-                 float64,   # r
-                 float64,   # q
-                 float64,   # kappa
-                 float64,   # theta
-                 float64,   # xi
-                 float64,   # rho
-                 float64))  # v0
+# 1) Characteristic function accepts complex128 u
+@njit(complex128(complex128,  # u (real or shifted complex)
+                 float64,    # lnS0
+                 float64,    # T
+                 float64,    # r
+                 float64,    # q
+                 float64,    # kappa
+                 float64,    # theta
+                 float64,    # xi
+                 float64,    # rho
+                 float64))   # v0
 def _heston_cf_numba(u, lnS0, T, r, q, kappa, theta, xi, rho, v0):
-    # characteristic function φ(u) under “little‐Heston‐Trap”
     iu = 1j * u
-    d  = np.sqrt((rho*xi*iu - kappa)**2
-                 + xi*xi * (u*u + iu))
+    d  = np.sqrt((rho*xi*iu - kappa)**2 + xi*xi * (u*u + iu))
     g  = (kappa - rho*xi*iu - d) / (kappa - rho*xi*iu + d)
     exp_dT = np.exp(-d * T)
-    # C‐term
-    C = (r - q)*iu*T \
-        + (theta*kappa/(xi*xi)) * (
+    C = (r - q)*iu*T + (theta*kappa/(xi*xi)) * (
             (kappa - rho*xi*iu - d)*T
             - 2.0 * np.log((1.0 - g*exp_dT)/(1.0 - g))
-          )
-    # D‐term
-    D = ((kappa - rho*xi*iu - d)/(xi*xi)) * (
-            (1.0 - exp_dT)/(1.0 - g*exp_dT)
         )
+    D = ((kappa - rho*xi*iu - d)/(xi*xi)) * ((1.0 - exp_dT)/(1.0 - g*exp_dT))
     return np.exp(C + D*v0 + iu * lnS0)
 
-# float64 outputs for P1 integrand
-@njit(float64(float64,   # u
+# 2) Single integrand for both P1 and P2
+@njit(float64(complex128,   # u
               float64,   # lnK
               float64,   # lnS0
               float64,   # T
@@ -55,24 +46,11 @@ def _heston_cf_numba(u, lnS0, T, r, q, kappa, theta, xi, rho, v0):
               float64,   # xi
               float64,   # rho
               float64))  # v0
-def _integrand_numba_P1(u, lnK, lnS0, T, r, q, kappa, theta, xi, rho, v0):
-    # φ(u) (j=1 ⇒ shift=0)
+def _integrand_numba(u, lnK, lnS0, T, r, q, kappa, theta, xi, rho, v0):
+    # computing for j=1 or j=2 is handled by shifting u externally
     cf = _heston_cf_numba(u, lnS0, T, r, q, kappa, theta, xi, rho, v0)
-    num = np.exp(-1j*u*lnK) * cf
-    return (num/(1j*u)).real
-
-# float64 outputs for P2 integrand
-@njit(float64(float64, float64, float64,
-              float64, float64, float64,
-              float64, float64, float64,
-              float64, float64))
-def _integrand_numba_P2(u, lnK, lnS0, T, r, q, kappa, theta, xi, rho, v0):
-    # φ(u - i) (j=2 ⇒ shift=1)
-    cf = _heston_cf_numba(u - 1.0j, lnS0, T, r, q, kappa, theta, xi, rho, v0)
-    num = np.exp(-1j*u*lnK) * cf
-    return (num/(1j*u)).real
-
-
+    num = np.exp(-1j * u * lnK) * cf
+    return (num / (1j * u)).real
 
 def _heston_cf(
     u: complex,
@@ -188,20 +166,30 @@ def heston_price(
     )
 
     def P(j: int) -> float:
-        lnK  = np.log(K)
-        lnS0 = np.log(S0)
-        if j == 1:
-            integr = lambda u: float(_integrand_numba_P1(
-                u, lnK, lnS0, T, r, q, kappa, theta, xi, rho, v0
-            ))
-        else:  # j == 2
-            integr = lambda u: float(_integrand_numba_P2(
-                u, lnK, lnS0, T, r, q, kappa, theta, xi, rho, v0
-            ))
+        # Pre-coerce all parameters to plain Python floats
+        lnK  = float(np.log(K))
+        lnS0 = float(np.log(S0))
+        T_f  = float(T)
+        r_f  = float(r)
+        q_f  = float(q)
+        k_f, th_f, xi_f, rho_f, v0_f = map(float, (kappa, theta, xi, rho, v0))
 
-        integral, _ = quad(integr, 0.0, np.inf, limit=50)
-        return 0.5 + (1.0/np.pi) * integral
+        # Complex shift for j=1 or j=2
+        shift = np.complex128(1j * (j - 1))
 
+        # Integrand wrapper matching Numba signature exactly
+        def integr(u):
+            u_c = np.complex128(u) - shift   # complex128
+            val = _integrand_numba(
+                u_c, lnK, lnS0, T_f, r_f, q_f,
+                k_f, th_f, xi_f, rho_f, v0_f
+            )
+            return float(val)
+
+        Umax = 100.0
+        integral, _ = quad(integr, 0.0, Umax, limit=50)
+        #integral, _ = quad(integr, 0.0, np.inf, limit=50)
+        return 0.5 + (1.0 / np.pi) * integral
 
     P1 = P(1)
     P2 = P(2)
@@ -285,16 +273,18 @@ def calibrate_heston(
     param_names = list(initial_guess.keys())
 
     def objective(x):
-        params = dict(zip(param_names, x))
-        # prepare args list once per objective call
-        args_list = [
-            (K, T, S0, r, q, params)
-            for K, T in zip(Ks_flat, Ts_flat)
-        ]
-        # parallel map
-        iv_mod = _CALIB_POOL.map(_model_iv_point, args_list)
+        params   = dict(zip(param_names, x))
+        args_list = [(K, T, S0, r, q, params)
+                     for K, T in zip(Ks_flat, Ts_flat)]
+        # If very few points, run sequentially to avoid Pool overhead
+        if len(args_list) < 16:
+            iv_mod = list(map(_model_iv_point, args_list))
+        else:
+            with mp.Pool(mp.cpu_count()) as pool:
+                iv_mod = pool.map(_model_iv_point, args_list)
         errs = (np.array(iv_mod) - target_iv) ** 2
         return float(errs.sum())
+
 
     result = minimize(objective, x0, bounds=bounds, method="L-BFGS-B")
     return dict(zip(param_names, result.x))
