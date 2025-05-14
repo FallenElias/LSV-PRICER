@@ -1,14 +1,31 @@
 import numpy as np
 import pandas as pd
-import multiprocessing as mp
 from scipy.integrate import quad
 from scipy.optimize import minimize
 from typing import Dict
 from utils.financial import bs_implied_vol  
 from numba import njit, complex128, float64
-from scipy.integrate import quad
+from scipy.integrate import quad, IntegrationWarning
+import time
+
+from multiprocessing.dummy import Pool as ThreadPool
 
 
+_CALIB_POOL = ThreadPool()
+
+
+import warnings
+warnings.filterwarnings("ignore", category=IntegrationWarning)
+
+import inspect
+
+print("Loading heston_calib from:", inspect.getsourcefile(inspect.getmodule(inspect.currentframe())))
+
+
+
+# Gauss–Laguerre nodes & weights for ∫₀^∞ e^{-u} g(u) du
+_GL_N = 16
+_GL_x, _GL_w = np.polynomial.laguerre.laggauss(_GL_N)
 
 
 # 1) Characteristic function accepts complex128 u
@@ -127,73 +144,98 @@ def heston_price(
     params: Dict[str, float],
 ) -> float:
     """
-    Price a European call under Heston via Fourier inversion.
+    Price a European call option under the Heston stochastic‐volatility model
+    using Fourier inversion and fixed‐node Gauss–Laguerre quadrature.
 
-    C(K,T) = S0 e^{-qT} P1 − K e^{-rT} P2
+    Formula:
+      C(K,T) = S0 * exp(-q T) * P1 − K * exp(-r T) * P2
+    where for j=1,2:
+      Pj = ½ + (1/π) ∫₀^∞ Re[ e^{-i u ln K} φ(u - i(j-1)) / (i u) ] du
 
-    where
-      Pj = ½ + (1/π) ∫₀^∞ Re[ e^{−i u ln K} φ(u − i(j−1)) / (i u) ] du
+    We approximate the infinite integral ∫₀^∞ f(u) du by a 16‐point
+    Gauss–Laguerre rule:
+      ∫₀^∞ f(u) du ≈ Σ_{i=1..16} w_i * exp(x_i) * f(x_i).
 
     Parameters
     ----------
-    K      : float
+    K : float
         Strike price.
-    T      : float
-        Time to maturity (years).
-    S0     : float
-        Spot price.
-    r      : float
-        Risk-free rate.
-    q      : float
-        Dividend yield.
+    T : float
+        Time to maturity (in years).
+    S0 : float
+        Current spot price.
+    r : float
+        Risk‐free interest rate (annualized, continuous).
+    q : float
+        Dividend yield (annualized, continuous).
     params : dict
         Heston parameters:
-          'kappa' : mean-reversion speed (κ)
-          'theta' : long-run variance (θ)
-          'xi'    : vol-of-vol (ξ)
-          'rho'   : correlation (ρ)
-          'v0'    : initial variance
+          'kappa' : mean‐reversion speed of variance (κ)
+          'theta' : long‐run variance (θ)
+          'xi'    : volatility of volatility (ξ)
+          'rho'   : correlation between asset and variance (ρ)
+          'v0'    : initial variance at t=0
 
     Returns
     -------
     price : float
-        Heston model European call price.
+        The model price of a European call.
     """
-    # Unpack parameters
-    kappa, theta, xi, rho, v0 = (
-        params["kappa"], params["theta"], params["xi"],
-        params["rho"], params["v0"]
-    )
+
+    
+    # Coerce inputs to native Python floats for consistency
+    K  = float(np.array(K).item())
+    T  = float(np.array(T).item())
+    S0 = float(np.array(S0).item())
+    r  = float(r)
+    q  = float(q)
+
+    kappa, theta, xi, rho, v0 = map(float, (
+        params["kappa"],
+        params["theta"],
+        params["xi"],
+        params["rho"],
+        params["v0"],
+    ))
 
     def P(j: int) -> float:
-        # Pre-coerce all parameters to plain Python floats
-        lnK  = float(np.log(K))
-        lnS0 = float(np.log(S0))
-        T_f  = float(T)
-        r_f  = float(r)
-        q_f  = float(q)
-        k_f, th_f, xi_f, rho_f, v0_f = map(float, (kappa, theta, xi, rho, v0))
-
-        # Complex shift for j=1 or j=2
+        """
+        Compute P1 or P2 via fixed‐node Gauss–Laguerre quadrature.
+        The shift j-1 moves the argument of the characteristic function.
+        """
+        lnK  = np.log(K)         # log-strike
+        lnS0 = np.log(S0)        # log-spot
         shift = np.complex128(1j * (j - 1))
 
-        # Integrand wrapper matching Numba signature exactly
-        def integr(u):
-            u_c = np.complex128(u) - shift   # complex128
-            val = _integrand_numba(
-                u_c, lnK, lnS0, T_f, r_f, q_f,
-                k_f, th_f, xi_f, rho_f, v0_f
+        def f(u: float) -> float:
+            """
+            Integrand f(u) = Re[ e^{-i u ln K} * φ(u - i(j-1)) / (i u) ]
+            evaluated at u = real Gauss–Laguerre node.
+            """
+            u_c = np.complex128(u) - shift
+            # φ = characteristic function from numba‐compiled routine
+            cf = _heston_cf_numba(
+                u_c, lnS0, T, r, q,
+                kappa, theta, xi, rho, v0
             )
-            return float(val)
+            # multiply by the Fourier kernel and divide by i u, take real part
+            numer = np.exp(-1j * u * lnK) * cf
+            return float((numer / (1j * u)).real)
 
-        Umax = 100.0
-        integral, _ = quad(integr, 0.0, Umax, limit=50)
-        #integral, _ = quad(integr, 0.0, np.inf, limit=50)
-        return 0.5 + (1.0 / np.pi) * integral
+        # evaluate f at all GL nodes, weight and sum
+        values   = np.array([f(xi) for xi in _GL_x])
+        weighted = _GL_w * np.exp(_GL_x)
+        integral = np.dot(weighted, values)
 
+        # return Pj = ½ + (1/π) * integral
+        return 0.5 + integral / np.pi
+
+    # compute the two probabilities
     P1 = P(1)
     P2 = P(2)
+    # assemble the Black‐Scholes‐style price
     return S0 * np.exp(-q * T) * P1 - K * np.exp(-r * T) * P2
+
 
 def _model_iv_point(args):
     K, T, S0, r, q, params = args
@@ -273,15 +315,25 @@ def calibrate_heston(
     param_names = list(initial_guess.keys())
 
     def objective(x):
+        # 1st call: record t0
+        if not hasattr(objective, "calls"):
+            objective.calls = 0
+            objective.t0   = time.perf_counter()
+        elif objective.calls == 1:
+            print("First objective took",
+                time.perf_counter() - objective.t0, "s")
+
+        # increment & report
+        objective.calls += 1
+        print(f">>> objective call #{objective.calls}")
+
         params   = dict(zip(param_names, x))
         args_list = [(K, T, S0, r, q, params)
-                     for K, T in zip(Ks_flat, Ts_flat)]
-        # If very few points, run sequentially to avoid Pool overhead
-        if len(args_list) < 16:
-            iv_mod = list(map(_model_iv_point, args_list))
-        else:
-            with mp.Pool(mp.cpu_count()) as pool:
-                iv_mod = pool.map(_model_iv_point, args_list)
+                    for K, T in zip(Ks_flat, Ts_flat)]
+
+        # fan out work to the pre-started worker processes
+        iv_mod = _CALIB_POOL.map(_model_iv_point, args_list)
+
         errs = (np.array(iv_mod) - target_iv) ** 2
         return float(errs.sum())
 

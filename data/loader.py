@@ -1,6 +1,7 @@
 import pandas as pd
 import yfinance as yf
 import datetime as dt
+from utils.financial import bs_implied_vol
 
 
 def fetch_spot_history(
@@ -36,40 +37,47 @@ def fetch_spot_history(
 
 def fetch_option_quotes(
     ticker: str,
+    S0: float,
+    r: float,
+    q: float,
 ) -> pd.DataFrame:
     """
-    Download option chain quotes for all expiries via yfinance.
-
-    Parameters
-    ----------
-    ticker : str
-        Equity symbol
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with columns:
-        ['contractSymbol','lastPrice','bid','ask','impliedVolatility',
-         'inTheMoney','contractSize','currency','type','strike','expiry']
+    Download option chain quotes for all expiries via yfinance,
+    compute mid_price and invert to implied vol only
+    when bid<ask and mid_price>0.
     """
-    tk = yf.Ticker(ticker)
+    tk       = yf.Ticker(ticker)
     expiries = tk.options
-    records = []
+    records  = []
 
     for expiry in expiries:
+        # time to expiry in years
+        T = (pd.to_datetime(expiry) - pd.Timestamp.today()).days / 365.0
         chain = tk.option_chain(expiry)
-        for kind in ['calls', 'puts']:
+
+        for kind in ('calls','puts'):
             df = getattr(chain, kind).copy()
-            df['type'] = kind[:-1]
+            df['type']   = kind[:-1]
             df['expiry'] = pd.to_datetime(expiry)
+            df['T']      = T
+
+            # mid‐price & preliminary filter
+            df['mid_price'] = (df['bid'] + df['ask']) / 2
+            df = df.dropna(subset=['bid','ask'])
+            df = df[df['bid'] < df['ask']]
+            df = df[df['mid_price'] > 0]
+
+            # safe inversion to implied vol
+            def safe_iv(row):
+                return bs_implied_vol(
+                    S0, row['strike'], row['T'], r, q, row['mid_price']
+                )
+
+            df['mid_iv'] = df.apply(safe_iv, axis=1)
             records.append(df)
 
-    df_opts = pd.concat(records, ignore_index=True)
-    # mid implied vol directly from yfinance
-    df_opts.rename(columns={'impliedVolatility': 'mid_iv'}, inplace=True)
-    # mid price from bid/ask
-    df_opts['mid_price'] = (df_opts['bid'] + df_opts['ask']) / 2
-    return df_opts[['strike', 'bid', 'ask', 'mid_price', 'mid_iv', 'expiry', 'type']]
+    result = pd.concat(records, ignore_index=True)
+    return result[['strike','bid','ask','mid_price','mid_iv','expiry','T','type']]
 
 
 def clean_option_quotes(
@@ -78,26 +86,11 @@ def clean_option_quotes(
     iv_range: tuple = (0.0, 5.0),
 ) -> pd.DataFrame:
     """
-    Filter out stale or illiquid option quotes.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Raw option quotes DataFrame
-    min_volume : int
-        Minimum volume threshold
-    iv_range : tuple
-        Allowable implied volatility range (low, high)
-
-    Returns
-    -------
-    pd.DataFrame
-        Filtered DataFrame with columns:
-        ['strike','bid','ask','mid_price','mid_iv','expiry','type']
+    Keep only liquid, in‐range quotes.
     """
-    df = df.dropna(subset=['bid', 'ask', 'mid_price', 'mid_iv'])
+    df = df.dropna(subset=['mid_price','mid_iv'])
     if 'volume' in df.columns:
         df = df[df['volume'] >= min_volume]
     df = df[(df['mid_iv'] >= iv_range[0]) & (df['mid_iv'] <= iv_range[1])]
     df = df[df['bid'] < df['ask']]
-    return df[['strike', 'bid', 'ask', 'mid_price', 'mid_iv', 'expiry', 'type']]
+    return df[['strike','bid','ask','mid_price','mid_iv','expiry','T','type']]

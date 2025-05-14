@@ -49,44 +49,42 @@ def bs_implied_vol(
     r: float,
     q: float,
     market_price: float,
-    tol: float = 1e-6,
-    maxiter: int = 100,
+    tol: float    = 1e-6,
+    maxiter: int  = 100,
 ) -> float:
     """
-    Solve for σ such that Black–Scholes call price equals market_price.
-
-    Parameters
-    ----------
-    S0           : float
-        Spot price.
-    K            : float
-        Strike.
-    T            : float
-        Time to maturity.
-    r            : float
-        Risk-free rate.
-    q            : float
-        Dividend yield.
-    market_price : float
-        Observed call price.
-    tol          : float
-        Solver tolerance.
-    maxiter      : int
-        Maximum iterations for root finding.
-
-    Returns
-    -------
-    implied_vol : float
-        The volatility σ that matches market_price.
+    Solve for σ so that Black–Scholes call price = market_price,
+    using Brent’s method on an adaptive bracket.
     """
-    # Define objective: BS_price(sigma) - market_price = 0
     def objective(sigma):
         return bs_call_price(S0, K, T, r, q, sigma) - market_price
 
-    # Vol bounds: [1e-6, 5.0]
+    # initial bracket [σ_low, σ_high]
+    sigma_low, sigma_high = 1e-6, 5.0
+
+    # check ends
     try:
-        iv = brentq(objective, 1e-6, 5.0, xtol=tol, maxiter=maxiter)
-    except ValueError:
-        # if price outside achievable range, return NaN
+        f_low  = objective(sigma_low)
+        f_high = objective(sigma_high)
+    except Exception:
         return np.nan
+
+    # if they have same sign, expand upper bound
+    if f_low * f_high > 0:
+        sigma_high = 10.0
+        try:
+            f_high = objective(sigma_high)
+        except Exception:
+            return np.nan
+        if f_low * f_high > 0:
+            # still no sign change, give up
+            return np.nan
+
+    # now we have f_low<0<f_high (or vice-versa), so root lies in between
+    try:
+        iv = brentq(objective, sigma_low, sigma_high,
+                    xtol=tol, maxiter=maxiter)
+    except ValueError:
+        return np.nan
+
     return iv
