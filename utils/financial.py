@@ -1,6 +1,9 @@
 import numpy as np
 from scipy.stats import norm
 from scipy.optimize import brentq
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 
 def bs_call_price(
     S0: float,
@@ -42,6 +45,9 @@ def bs_call_price(
             - K*np.exp(-r*T)*norm.cdf(d2))
 
 
+import numpy as np
+from scipy.optimize import brentq
+
 def bs_implied_vol(
     S0: float,
     K: float,
@@ -49,27 +55,36 @@ def bs_implied_vol(
     r: float,
     q: float,
     market_price: float,
-    tol: float    = 1e-6,
-    maxiter: int  = 100,
+    tol: float = 1e-6,
+    maxiter: int = 100,
 ) -> float:
     """
     Solve for σ so that Black–Scholes call price = market_price,
     using Brent’s method on an adaptive bracket.
     """
+    # coerce everything to native Python floats
+    S0           = float(S0)
+    K            = float(K)
+    T            = float(T)
+    r            = float(r)
+    q            = float(q)
+    market_price = float(market_price)
+
     def objective(sigma):
+        # bs_call_price is already pure‐float‐based
         return bs_call_price(S0, K, T, r, q, sigma) - market_price
 
     # initial bracket [σ_low, σ_high]
     sigma_low, sigma_high = 1e-6, 5.0
 
-    # check ends
+    # evaluate at the ends
     try:
         f_low  = objective(sigma_low)
         f_high = objective(sigma_high)
     except Exception:
         return np.nan
 
-    # if they have same sign, expand upper bound
+    # if no sign change, try to expand
     if f_low * f_high > 0:
         sigma_high = 10.0
         try:
@@ -77,10 +92,8 @@ def bs_implied_vol(
         except Exception:
             return np.nan
         if f_low * f_high > 0:
-            # still no sign change, give up
             return np.nan
 
-    # now we have f_low<0<f_high (or vice-versa), so root lies in between
     try:
         iv = brentq(objective, sigma_low, sigma_high,
                     xtol=tol, maxiter=maxiter)

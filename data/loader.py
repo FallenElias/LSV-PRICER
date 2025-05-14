@@ -42,9 +42,8 @@ def fetch_option_quotes(
     q: float,
 ) -> pd.DataFrame:
     """
-    Download option chain quotes for all expiries via yfinance,
-    compute mid_price and invert to implied vol only
-    when bid<ask and mid_price>0.
+    Download option chain from Yahoo, compute mid_price (bid/ask midpoint),
+    drop any bad quotes, then invert to mid_iv via bs_implied_vol.
     """
     tk       = yf.Ticker(ticker)
     expiries = tk.options
@@ -52,7 +51,7 @@ def fetch_option_quotes(
 
     for expiry in expiries:
         # time to expiry in years
-        T = (pd.to_datetime(expiry) - pd.Timestamp.today()).days / 365.0
+        T     = (pd.to_datetime(expiry) - pd.Timestamp.today()).days / 365.0
         chain = tk.option_chain(expiry)
 
         for kind in ('calls','puts'):
@@ -61,23 +60,27 @@ def fetch_option_quotes(
             df['expiry'] = pd.to_datetime(expiry)
             df['T']      = T
 
-            # mid‐price & preliminary filter
+            # mid‐price and basic sanity filters
             df['mid_price'] = (df['bid'] + df['ask']) / 2
             df = df.dropna(subset=['bid','ask'])
             df = df[df['bid'] < df['ask']]
             df = df[df['mid_price'] > 0]
 
-            # safe inversion to implied vol
-            def safe_iv(row):
-                return bs_implied_vol(
+            # invert to implied vol
+            df['mid_iv'] = df.apply(
+                lambda row: bs_implied_vol(
                     S0, row['strike'], row['T'], r, q, row['mid_price']
-                )
+                ),
+                axis=1
+            )
 
-            df['mid_iv'] = df.apply(safe_iv, axis=1)
             records.append(df)
 
-    result = pd.concat(records, ignore_index=True)
-    return result[['strike','bid','ask','mid_price','mid_iv','expiry','T','type']]
+    out = pd.concat(records, ignore_index=True)
+    return out[[
+        'strike','bid','ask','mid_price','mid_iv',
+        'expiry','T','type'
+    ]]
 
 
 def clean_option_quotes(
