@@ -89,9 +89,11 @@ def clean_option_quotes(
     iv_range: tuple = (0.0, 5.0),
 ) -> pd.DataFrame:
     """
-    Keep only liquid, in‐range quotes.
+    Keep only liquid, in‐range call quotes.
     """
     df = df.dropna(subset=['mid_price','mid_iv'])
+    # keep calls only
+    df = df[df['type'] == 'call']
     if 'volume' in df.columns:
         df = df[df['volume'] >= min_volume]
     df = df[(df['mid_iv'] >= iv_range[0]) & (df['mid_iv'] <= iv_range[1])]

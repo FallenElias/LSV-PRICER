@@ -67,6 +67,7 @@ class LSVPricerGUI(tk.Tk):
         # New Diagnostics button
         self.diag_btn = ttk.Button(frm, text="Diagnostics", command=self._on_diagnostics)
         self.diag_btn.grid(row=8, column=0, columnspan=2, pady=5)
+        self.diag_btn.config(state="disabled")  # off while calib on work
 
         # Result display (moved to row 9)
         self.result_var = tk.StringVar()
@@ -107,58 +108,47 @@ class LSVPricerGUI(tk.Tk):
             
     def _on_calibrate(self):
         """
-        Kick off background calibration + leverage build with a live timer.
+        Build IV surface, local vol, calibrate Heston, and build leverage function —
+        now on the FULL strike × expiry grid.
         """
-        # disable UI controls
+        # 0) disable UI controls
         self.fetch_btn.config(state="disabled")
         self.calib_btn.config(state="disabled")
 
-        # prepare inputs
+        # 1) grab spot and option data
         spot_date   = self.spot["date"].iloc[-1]
         S0          = self.spot["Close"].iloc[-1]
         exp_days    = (self.opts["expiry"] - spot_date).dt.days
-        times_full  = np.unique(exp_days / 365.0)
-        strikes_full= np.sort(self.opts["strike"].unique())
+        # full list of unique expiries (in years) and strikes
+        self.times   = np.unique(exp_days / 365.0)
+        self.strikes = np.sort(self.opts["strike"].unique())
 
-        # down-sample to 5 × 7 grid for speed
-        nT    = min(5, len(times_full))
-        times = times_full[np.linspace(0, len(times_full)-1, nT, dtype=int)]
-        nK      = min(7, len(strikes_full))
-        strikes = strikes_full[np.linspace(0, len(strikes_full)-1, nK, dtype=int)]
-
-        # persist the grid for diagnostics
-        self.strikes = strikes
-        self.times   = times
-
-        iv_mat = np.zeros((len(times), len(strikes)))
-        for i, T in enumerate(times):
+        # 2) build full IV matrix
+        iv_mat = np.empty((len(self.times), len(self.strikes)))
+        iv_mat[:] = np.nan
+        for i, T in enumerate(self.times):
             mask = np.isclose(exp_days / 365.0, T)
             slice_df = self.opts[mask]
-            for j, K in enumerate(strikes):
-                iv_mat[i, j] = slice_df.loc[slice_df["strike"] == K, "mid_iv"].mean()
+            for j, K in enumerate(self.strikes):
+                iv_mat[i, j] = slice_df.loc[
+                    slice_df["strike"] == K, "mid_iv"
+                ].mean()
 
-        print("raw iv_mat:\n", iv_mat)
+        print(">>> raw iv_mat (full grid):\n", iv_mat)
 
-        # store for background task
-        self._calib_inputs = (strikes, times, iv_mat, S0)
+        # 3) persist for diagnostics & background task
         self._last_market_iv = iv_mat.copy()
+        self._calib_inputs   = (self.strikes, self.times, iv_mat, S0)
 
-
-        # start timer display
+        # 4) start the live timer in the GUI
         self._calib_start = time.perf_counter()
         self.result_var.set("Calibrating… 0s elapsed")
-        self._timer_id = self.after(1000, self._update_timer)
+        self._timer_id    = self.after(1000, self._update_timer)
 
-        # launch background thread
+        # 5) kick off the calibration/leverage build on a background thread
         thread = threading.Thread(target=self._calibrate_task, daemon=True)
         thread.start()
-        
-    def _update_timer(self):
-        """Update elapsed-time every second."""
-        elapsed = int(time.perf_counter() - self._calib_start)
-        self.result_var.set(f"Calibrating… {elapsed}s elapsed")
-        self._timer_id = self.after(1000, self._update_timer)
-
+            
     def _calibrate_task(self):
         """
         Runs in background. Does calibration, simulate-Heston, leverage build.
@@ -205,10 +195,14 @@ class LSVPricerGUI(tk.Tk):
         # store results
         self.heston_params = calib
         self.L_func         = Lf
+        
+        messagebox.showinfo("Calibrate", "Calibration and leverage build complete")
+        # re-enable the Diagnostics button now that we have valid IV data
 
         # re-enable buttons
         self.fetch_btn.config(state="normal")
         self.calib_btn.config(state="normal")
+        self.diag_btn.config(state="normal")
 
     
     def _on_simulate(self):
@@ -272,45 +266,65 @@ class LSVPricerGUI(tk.Tk):
         self.result_var.set(f"Price: {price:.4f}")
         
     def _on_diagnostics(self):
-        """
-        Plot market vs model IV heatmap and print RMSE,
-        re-using the last calibration without re-fitting.
-        """
-        # 1) Grab stored data & calib
+        # 1) grab stored grid + calib
         strikes   = self.strikes
         times     = self.times
         market_iv = self._last_market_iv
         calib     = self.heston_params
-        S0        = self.spot["Close"].iloc[-1]
+        S0        = float(self.spot["Close"].iloc[-1])
         r, q      = 0.0, 0.0
-        
-        # 2) Compute model IV surface
-        model_iv = np.zeros_like(market_iv)
-        for i, T in enumerate(times):
-            for j, K in enumerate(strikes):
-                price        = heston_price(K, T, S0, r, q, calib)
-                model_iv[i,j]= bs_implied_vol(S0, K, T, r, q, price)
 
-        # 3) Show heatmap
-        error = model_iv - market_iv
-        # mask off missing
-        valid = ~np.isnan(error)
-        if not np.any(valid):
-            messagebox.showerror("Diagnostics","no valid IV points to compare")
+        # 2) find only the observed points
+        i_valid, j_valid = np.where(~np.isnan(market_iv))
+        if len(i_valid) == 0:
+            messagebox.showerror("Diagnostics", "No valid IV points to compare")
             return
-        plt.figure(figsize=(5,4))
-        plt.pcolormesh(
-        strikes, times, np.where(valid, error, np.nan),
-        cmap="bwr", vmin=-0.02, vmax=0.02
-        )
-        plt.colorbar(label="Model−Market IV")
-        plt.xlabel("Strike"); plt.ylabel("Maturity")
-        plt.title("IV Fit Error")
-        plt.show()
 
-        # 4) Print RMSE in the GUI
-        rmse = np.sqrt(np.mean(error**2))
-        messagebox.showinfo("Diagnostics", f"IV fit RMSE: {rmse:.4%}")
+        # 3) compute model IV & residuals at those points
+        model_vals = []
+        market_vals = []
+        for ii, jj in zip(i_valid, j_valid):
+            T, K = times[ii], strikes[jj]
+            price = heston_price(K, T, S0, r, q, calib)
+            iv_mod = bs_implied_vol(S0, K, T, r, q, price)
+            model_vals.append(iv_mod)
+            market_vals.append(market_iv[ii, jj])
+            
+        model_vals = np.array(model_vals)
+        market_vals = np.array(market_vals)
+            
+        # now drop any pairs where either is NaN
+        good = ~(np.isnan(model_vals) | np.isnan(market_vals))
+        if not np.any(good):
+            messagebox.showerror("Diagnostics", "No valid IV points after filtering NaNs")
+            return
+
+        model_vals  = model_vals[good]
+        market_vals = market_vals[good]
+        errors      = model_vals - market_vals
+
+        # 4) RMSE and popup
+        rmse = np.sqrt(np.mean(errors**2))
+        messagebox.showinfo("Diagnostics", f"IV fit RMSE: {rmse:.2%}")
+
+        # 5) scatter-plot residuals only at observed (K,T)
+        plt.figure(figsize=(5,4))
+        sc = plt.scatter(
+            strikes[j_valid], times[i_valid],
+            c=errors, cmap="bwr", vmin=-0.02, vmax=0.02
+        )
+        plt.colorbar(sc, label="Model − Market IV")
+        plt.xlabel("Strike")
+        plt.ylabel("Maturity")
+        plt.title("IV Fit Error (observed quotes only)")
+        plt.show()
+    
+    def _update_timer(self):
+        """Update elapsed-time every second."""
+        elapsed = int(time.perf_counter() - self._calib_start)
+        self.result_var.set(f"Calibrating… {elapsed}s elapsed")
+        self._timer_id = self.after(1000, self._update_timer)
+
 
 if __name__ == "__main__":
     # 1) JIT‐warmup: compile heston_price once
