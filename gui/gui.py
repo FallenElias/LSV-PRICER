@@ -42,6 +42,21 @@ class LSVPricerGUI(tk.Tk):
         ttk.Label(frm, text="Barrier").grid(row=3, column=0, sticky="w")
         self.barrier = ttk.Entry(frm)
         self.barrier.grid(row=3, column=1)
+        
+        ttk.Label(frm, text="r").grid(row=10, column=0)
+        self.r_entry = ttk.Entry(frm); self.r_entry.insert(0, "0.0")
+        self.r_entry.grid(row=10, column=1)
+
+        ttk.Label(frm, text="q").grid(row=11, column=0)
+        self.q_entry = ttk.Entry(frm); self.q_entry.insert(0, "0.0")
+        self.q_entry.grid(row=11, column=1)
+        
+        ttk.Label(frm, text="Maturity").grid(row=12, column=0)
+        # will populate after calibration
+        self.maturity_cb = ttk.Combobox(frm, values=[])
+        self.maturity_cb.grid(row=12, column=1)
+
+
 
         # Buttons
         self.fetch_btn = ttk.Button(frm, text="Fetch & Clean Data", command=self._on_fetch)
@@ -105,7 +120,9 @@ class LSVPricerGUI(tk.Tk):
         times_ds = times_full[idx_T]
         iv_ds = iv_mat_full[np.ix_(idx_T, idx_K)]
 
-        self._calib_inputs = (strikes_ds, times_ds, iv_ds, S0, strikes_full, times_full, iv_mat_full)
+        self._calib_inputs = (strikes_ds, times_ds, iv_ds, S0, strikes_full, times_full, iv_mat_full)        
+        self.maturity_cb.config(values=[str(t) for t in times_ds])
+        self.maturity_cb.current(len(times_ds)-1)
         self._calib_start = time.perf_counter()
         self.result_var.set("Calibrating… 0s elapsed")
         self._timer_id = self.after(1000, self._update_timer)
@@ -134,37 +151,93 @@ class LSVPricerGUI(tk.Tk):
         messagebox.showinfo("Calibrate", "Done")
 
     def _on_simulate(self):
-        if not hasattr(self,'L_func'):
-            messagebox.showwarning("Error", "Calibrate first")
+        if not hasattr(self, 'L_func'):
+            messagebox.showwarning("Error", "Please click 'Calibrate & Build L' first.")
             return
-        S0 = self.spot['Close'].iloc[-1]
+
+        # Spot and params
+        S0 = float(self.spot['Close'].iloc[-1])
         params = self.heston_params
-        Ts = self._calib_inputs[1]
-        self.S_paths, _ = simulate_heston(
-            S0, params['v0'], params['kappa'], params['theta'], params['xi'], params['rho'],
-            0.0, 0.0, Ts, 100, 5000
+
+        # Read r, q
+        try:    r = float(self.r_entry.get())
+        except: r = 0.0
+        try:    q = float(self.q_entry.get())
+        except: q = 0.0
+
+        # Read maturity (scalar) and make it an array
+        Tsel = float(self.maturity_cb.get())
+        mat_array = np.array([Tsel])
+
+        # Simulate LSV paths
+        n_steps = 100
+        n_paths = 50000
+        self.S_paths, self.v_paths = simulate_heston(
+            S0, params['v0'],
+            params['kappa'], params['theta'],
+            params['xi'], params['rho'],
+            r, q,
+            maturities=mat_array,
+            n_steps=n_steps,
+            n_paths=n_paths
         )
+
+        # Plot first 500 paths
+        t_grid = np.linspace(0, Tsel, n_steps + 1)
         self.ax.clear()
-        t = np.linspace(0, Ts[-1], 101)
-        for p in self.S_paths[:20]:
-            self.ax.plot(t, p, linewidth=0.6)
+        self.ax.set_xlabel("Time (years)")
+        self.ax.set_ylabel("Spot price")
+        for path in self.S_paths[:500]:
+            self.ax.plot(t_grid, path, linewidth=0.6)
         self.canvas.draw()
 
     def _on_price(self):
-        if not hasattr(self,'S_paths'):
-            messagebox.showwarning("Error", "Simulate first")
+        if not hasattr(self, 'S_paths'):
+            messagebox.showwarning("Error", "Please run ‘Run Simulation’ first")
             return
-        prod = self.prod_cb.get()
+
+        # 1) Read user inputs
         K = float(self.strike.get())
-        T = self._calib_inputs[1][-1]
-        disc = np.exp(-0.0 * T)
+        prod = self.prod_cb.get()
+        # discount parameters
+        try:
+            r = float(self.r_entry.get())
+        except:
+            r = 0.0
+        try:
+            q = float(self.q_entry.get())
+        except:
+            q = 0.0
+        # maturity
+        Tsel = float(self.maturity_cb.get())
+        discount = np.exp(-r * Tsel)
+
+        # 2) Price according to product
         if prod == "European":
-            price = european_price_mc(lambda ST: np.maximum(ST - K, 0), self.S_paths, disc)
+            payoff = lambda ST: np.maximum(ST - K, 0.0)
+            price = european_price_mc(payoff, self.S_paths, discount)
+
         elif prod == "Barrier":
             B = float(self.barrier.get())
-            price = barrier_price_mc(self.S_paths, K, B, True, True, disc)
-        else:
-            price = asian_price_mc(self.S_paths, K, True, disc)
+            # up-and-out call
+            price = barrier_price_mc(
+                self.S_paths,
+                strike=K,
+                barrier=B,
+                is_up=True,
+                is_call=True,
+                discount=discount
+            )
+
+        else:  # Asian
+            price = asian_price_mc(
+                self.S_paths,
+                strike=K,
+                is_call=True,
+                discount=discount
+            )
+
+        # 3) Display
         self.result_var.set(f"Price: {price:.4f}")
 
     def _on_diagnostics(self):
