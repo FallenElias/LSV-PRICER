@@ -26,63 +26,53 @@ class LSVPricerGUI(tk.Tk):
         frm = ttk.Frame(self)
         frm.pack(side="left", fill="y", padx=10, pady=10)
 
+        # Data inputs
         ttk.Label(frm, text="Ticker").grid(row=0, column=0, sticky="w")
-        self.ticker = ttk.Entry(frm)
-        self.ticker.grid(row=0, column=1)
+        self.ticker = ttk.Entry(frm); self.ticker.grid(row=0, column=1)
 
         ttk.Label(frm, text="Product").grid(row=1, column=0, sticky="w")
-        self.prod_cb = ttk.Combobox(frm, values=["European","Barrier","Asian"])
-        self.prod_cb.current(0)
-        self.prod_cb.grid(row=1, column=1)
+        self.prod_cb = ttk.Combobox(frm, values=["European","Barrier","Asian"], state='readonly')
+        self.prod_cb.current(0); self.prod_cb.grid(row=1, column=1)
 
         ttk.Label(frm, text="Strike").grid(row=2, column=0, sticky="w")
-        self.strike = ttk.Entry(frm)
-        self.strike.grid(row=2, column=1)
+        self.strike = ttk.Entry(frm); self.strike.grid(row=2, column=1)
 
         ttk.Label(frm, text="Barrier").grid(row=3, column=0, sticky="w")
-        self.barrier = ttk.Entry(frm)
-        self.barrier.grid(row=3, column=1)
-        
-        ttk.Label(frm, text="r").grid(row=10, column=0)
-        self.r_entry = ttk.Entry(frm); self.r_entry.insert(0, "0.0")
-        self.r_entry.grid(row=10, column=1)
+        self.barrier = ttk.Entry(frm); self.barrier.grid(row=3, column=1)
 
-        ttk.Label(frm, text="q").grid(row=11, column=0)
-        self.q_entry = ttk.Entry(frm); self.q_entry.insert(0, "0.0")
-        self.q_entry.grid(row=11, column=1)
-        
-        ttk.Label(frm, text="Maturity").grid(row=12, column=0)
-        # will populate after calibration
-        self.maturity_cb = ttk.Combobox(frm, values=[])
-        self.maturity_cb.grid(row=12, column=1)
+        # Rate inputs
+        ttk.Label(frm, text="r").grid(row=4, column=0, sticky="w")
+        self.r_entry = ttk.Entry(frm); self.r_entry.insert(0, "0.0"); self.r_entry.grid(row=4, column=1)
+        ttk.Label(frm, text="q").grid(row=5, column=0, sticky="w")
+        self.q_entry = ttk.Entry(frm); self.q_entry.insert(0, "0.0"); self.q_entry.grid(row=5, column=1)
 
+        # Maturity input
+        ttk.Label(frm, text="Maturity").grid(row=6, column=0, sticky="w")
+        self.maturity_cb = ttk.Combobox(frm, values=[], state='normal')
+        self.maturity_cb.grid(row=6, column=1)
 
-
-        # Buttons
+        # Action buttons
         self.fetch_btn = ttk.Button(frm, text="Fetch & Clean Data", command=self._on_fetch)
-        self.fetch_btn.grid(row=4, column=0, columnspan=2, pady=5)
-
+        self.fetch_btn.grid(row=7, column=0, columnspan=2, pady=5)
         self.calib_btn = ttk.Button(frm, text="Calibrate & Build L", command=self._on_calibrate)
-        self.calib_btn.grid(row=5, column=0, columnspan=2, pady=5)
-
+        self.calib_btn.grid(row=8, column=0, columnspan=2, pady=5)
         self.sim_btn = ttk.Button(frm, text="Run Simulation", command=self._on_simulate)
-        self.sim_btn.grid(row=6, column=0, columnspan=2, pady=5)
-
+        self.sim_btn.grid(row=9, column=0, columnspan=2, pady=5)
         self.price_btn = ttk.Button(frm, text="Price", command=self._on_price)
-        self.price_btn.grid(row=7, column=0, columnspan=2, pady=5)
-
+        self.price_btn.grid(row=10, column=0, columnspan=2, pady=5)
         self.diag_btn = ttk.Button(frm, text="Diagnostics", command=self._on_diagnostics)
-        self.diag_btn.grid(row=8, column=0, columnspan=2, pady=5)
+        self.diag_btn.grid(row=11, column=0, columnspan=2, pady=5)
         self.diag_btn.config(state="disabled")
 
         self.result_var = tk.StringVar()
-        ttk.Label(frm, textvariable=self.result_var, foreground="blue").grid(row=9, column=0, columnspan=2, pady=10)
+        ttk.Label(frm, textvariable=self.result_var, foreground="blue").grid(row=12, column=0, columnspan=2, pady=10)
 
     def _build_plot_area(self):
-        fig = Figure(figsize=(6,4))
+        fig = Figure(figsize=(8,6))
         self.ax = fig.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(fig, master=self)
         self.canvas.get_tk_widget().pack(side="right", fill="both", expand=True)
+
 
     def _on_fetch(self):
         ticker = self.ticker.get().upper()
@@ -306,6 +296,4 @@ class LSVPricerGUI(tk.Tk):
         self.result_var.set(f"Calibrating… {elapsed}s elapsed")
         self._timer_id = self.after(1000, self._update_timer)
 
-if __name__ == "__main__":
-    app = LSVPricerGUI()
-    app.mainloop()
+
