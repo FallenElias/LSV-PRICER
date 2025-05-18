@@ -3,43 +3,42 @@ from scipy.interpolate import RectBivariateSpline
 from typing import Callable, Tuple, Dict
 
 
+from scipy.interpolate import RectBivariateSpline, NearestNDInterpolator
+import numpy as np
+
+from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
+
 def fit_iv_surface(
     strikes: np.ndarray,
     maturities: np.ndarray,
     iv_matrix: np.ndarray,
-    kx: int = 3,
-    ky: int = 3,
 ) -> Callable[[float, float], float]:
     """
-    Fit a smooth implied-volatility surface σ_imp(K,T) via 2D spline.
-
-    Parameters
-    ----------
-    strikes : np.ndarray, shape (M,)
-        Sorted array of strikes K.
-    maturities : np.ndarray, shape (N,)
-        Sorted array of maturities T (in years or days).
-    iv_matrix : np.ndarray, shape (N, M)
-        Matrix of implied vols, rows correspond to maturities, columns to strikes.
-    kx : int
-        Degree of spline in K (default cubic).
-    ky : int
-        Degree of spline in T (default cubic).
-
-    Returns
-    -------
-    iv_func : Callable[[float, float], float]
-        Function iv_func(K, T) that returns interpolated implied vol.
+    Fit an implied‐vol surface σ_imp(K,T) from scattered IV data
+    via linear interpolation with nearest‐neighbor fallback.
     """
-    # ensure inputs are sorted
-    Ks = np.asarray(strikes)
-    Ts = np.asarray(maturities)
-    IV = np.asarray(iv_matrix)
-    # build the spline
-    spline = RectBivariateSpline(Ts, Ks, IV, kx=kx, ky=ky)
+    # 1) collect all non‐NaN points
+    Ks, Ts = np.meshgrid(strikes, maturities)
+    mask   = ~np.isnan(iv_matrix)
+    pts    = np.column_stack([Ks[mask], Ts[mask]])  # shape (n_pts, 2)
+    vals   = iv_matrix[mask]                        # shape (n_pts,)
+
+    if len(vals) == 0:
+        raise ValueError("No IV data to fit surface")
+
+    # 2) build a linear interpolator, and a nearest fallback
+    lin_interp = LinearNDInterpolator(pts, vals)
+    nn_interp  = NearestNDInterpolator(pts, vals)
+
+    # 3) define the callable surface
     def iv_func(K: float, T: float) -> float:
-        return float(spline(T, K))
+        z = lin_interp(K, T)
+        if np.isnan(z):
+            z = nn_interp(K, T)
+        return float(z)
+
     return iv_func
+
 
 
 def svi_parametrize(

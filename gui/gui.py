@@ -6,18 +6,14 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import threading
 import time
 import matplotlib.pyplot as plt
-from utils.financial import bs_implied_vol
-from model.heston_calib import heston_price
 
-
-# backend modules
-from data.loader           import fetch_spot_history, fetch_option_quotes, clean_option_quotes
-from model.surface         import fit_iv_surface
-from model.local_vol       import dupire_local_vol
-from model.heston_calib    import calibrate_heston
-from model.leverage        import simulate_heston, estimate_conditional_variance, build_leverage_function
-from model.mc_engine import simulate_lsv_parallel as simulate_lsv
-from pricing.pricing       import european_price_mc, barrier_price_mc, asian_price_mc
+from data.loader import fetch_spot_history, fetch_option_quotes, clean_option_quotes
+from pricing.pricing import european_price_mc, barrier_price_mc, asian_price_mc
+from model.surface import fit_iv_surface
+from model.local_vol import dupire_local_vol
+from model.heston_calib import calibrate_heston
+from model.leverage import simulate_heston, estimate_conditional_variance, build_leverage_function
+from utils.financial import bs_call_price
 
 class LSVPricerGUI(tk.Tk):
     def __init__(self):
@@ -25,28 +21,24 @@ class LSVPricerGUI(tk.Tk):
         self.title("LSV Pricer")
         self._build_controls()
         self._build_plot_area()
-        
+
     def _build_controls(self):
         frm = ttk.Frame(self)
         frm.pack(side="left", fill="y", padx=10, pady=10)
 
-        # Ticker entry
         ttk.Label(frm, text="Ticker").grid(row=0, column=0, sticky="w")
         self.ticker = ttk.Entry(frm)
         self.ticker.grid(row=0, column=1)
 
-        # Derivative type
         ttk.Label(frm, text="Product").grid(row=1, column=0, sticky="w")
-        self.prod_cb = ttk.Combobox(frm, values=["European", "Barrier", "Asian"])
+        self.prod_cb = ttk.Combobox(frm, values=["European","Barrier","Asian"])
         self.prod_cb.current(0)
         self.prod_cb.grid(row=1, column=1)
 
-        # Strike
         ttk.Label(frm, text="Strike").grid(row=2, column=0, sticky="w")
         self.strike = ttk.Entry(frm)
         self.strike.grid(row=2, column=1)
 
-        # Barrier (only if Barrier)
         ttk.Label(frm, text="Barrier").grid(row=3, column=0, sticky="w")
         self.barrier = ttk.Entry(frm)
         self.barrier.grid(row=3, column=1)
@@ -64,16 +56,12 @@ class LSVPricerGUI(tk.Tk):
         self.price_btn = ttk.Button(frm, text="Price", command=self._on_price)
         self.price_btn.grid(row=7, column=0, columnspan=2, pady=5)
 
-        # New Diagnostics button
         self.diag_btn = ttk.Button(frm, text="Diagnostics", command=self._on_diagnostics)
         self.diag_btn.grid(row=8, column=0, columnspan=2, pady=5)
-        self.diag_btn.config(state="disabled")  # off while calib on work
+        self.diag_btn.config(state="disabled")
 
-        # Result display (moved to row 9)
         self.result_var = tk.StringVar()
-        ttk.Label(frm, textvariable=self.result_var, foreground="blue") \
-            .grid(row=9, column=0, columnspan=2, pady=10)
-
+        ttk.Label(frm, textvariable=self.result_var, foreground="blue").grid(row=9, column=0, columnspan=2, pady=10)
 
     def _build_plot_area(self):
         fig = Figure(figsize=(6,4))
@@ -82,259 +70,169 @@ class LSVPricerGUI(tk.Tk):
         self.canvas.get_tk_widget().pack(side="right", fill="both", expand=True)
 
     def _on_fetch(self):
-        tk = self.ticker.get().upper()
+        ticker = self.ticker.get().upper()
         try:
-            # 1) load spot history + grab S₀
-            self.spot = fetch_spot_history(tk, years=3)
-            S0        = self.spot["Close"].iloc[-1]
-
-            # 2) load option quotes with our IV inversion
-            raw_opts = fetch_option_quotes(
-                tk,
-                S0,
-                r=0.0,
-                q=0.0
-            )
+            self.spot = fetch_spot_history(ticker, years=3)
+            S0 = self.spot['Close'].iloc[-1]
+            raw_opts = fetch_option_quotes(ticker, S0, 0.0, 0.0)
             self.opts = clean_option_quotes(raw_opts)
-
-            messagebox.showinfo(
-                "Data",
-                f"Loaded {len(self.spot)} spot rows and {len(self.opts)} option quotes"
-            )
+            messagebox.showinfo("Data", f"Loaded {len(self.spot)} spot rows and {len(self.opts)} option quotes")
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
-
-            
     def _on_calibrate(self):
-        """
-        Build IV surface, local vol, calibrate Heston, and build leverage function —
-        now on the FULL strike × expiry grid.
-        """
-        # 0) disable UI controls
         self.fetch_btn.config(state="disabled")
         self.calib_btn.config(state="disabled")
+        spot_date = self.spot['date'].iloc[-1]
+        S0 = float(self.spot['Close'].iloc[-1])
+        exp_days = (self.opts['expiry'] - spot_date).dt.days
 
-        # 1) grab spot and option data
-        spot_date   = self.spot["date"].iloc[-1]
-        S0          = self.spot["Close"].iloc[-1]
-        exp_days    = (self.opts["expiry"] - spot_date).dt.days
-        # full list of unique expiries (in years) and strikes
-        self.times   = np.unique(exp_days / 365.0)
-        self.strikes = np.sort(self.opts["strike"].unique())
+        times_full = np.unique(exp_days/365.0)
+        strikes_full = np.sort(self.opts['strike'].unique())
+        iv_mat_full = np.full((len(times_full), len(strikes_full)), np.nan)
+        for i, t in enumerate(times_full):
+            iv_mat_full[i] = (
+                self.opts.loc[np.isclose(exp_days/365.0, t)]
+                .groupby('strike')['mid_iv'].mean()
+                .reindex(strikes_full).values
+            )
 
-        # 2) build full IV matrix
-        iv_mat = np.empty((len(self.times), len(self.strikes)))
-        iv_mat[:] = np.nan
-        for i, T in enumerate(self.times):
-            mask = np.isclose(exp_days / 365.0, T)
-            slice_df = self.opts[mask]
-            for j, K in enumerate(self.strikes):
-                iv_mat[i, j] = slice_df.loc[
-                    slice_df["strike"] == K, "mid_iv"
-                ].mean()
+        M, N = len(strikes_full), len(times_full)
+        nK, nT = min(7, M), min(5, N)
+        idx_K = np.linspace(0, M-1, nK, dtype=int)
+        idx_T = np.linspace(0, N-1, nT, dtype=int)
+        strikes_ds = strikes_full[idx_K]
+        times_ds = times_full[idx_T]
+        iv_ds = iv_mat_full[np.ix_(idx_T, idx_K)]
 
-        print(">>> raw iv_mat (full grid):\n", iv_mat)
-
-        # 3) persist for diagnostics & background task
-        self._last_market_iv = iv_mat.copy()
-        self._calib_inputs   = (self.strikes, self.times, iv_mat, S0)
-
-        # 4) start the live timer in the GUI
+        self._calib_inputs = (strikes_ds, times_ds, iv_ds, S0, strikes_full, times_full, iv_mat_full)
         self._calib_start = time.perf_counter()
         self.result_var.set("Calibrating… 0s elapsed")
-        self._timer_id    = self.after(1000, self._update_timer)
+        self._timer_id = self.after(1000, self._update_timer)
+        threading.Thread(target=self._calibrate_task, daemon=True).start()
 
-        # 5) kick off the calibration/leverage build on a background thread
-        thread = threading.Thread(target=self._calibrate_task, daemon=True)
-        thread.start()
-            
     def _calibrate_task(self):
-        """
-        Runs in background. Does calibration, simulate-Heston, leverage build.
-        On completion, schedules _calibrate_done on the main thread.
-        """
-        strikes, times, iv_mat, S0 = self._calib_inputs
-        try:
-            # 1) fit IV surface & local vol
-            self.iv_func   = fit_iv_surface(strikes, times, iv_mat)
-            self.sigma_loc = dupire_local_vol(S0, strikes, times, self.iv_func, r=0.0, q=0.0)
-
-            # 2) calibrate Heston
-            calib = calibrate_heston(strikes, times, iv_mat, S0, r=0.0, q=0.0)
-
-            # 3) simulate pure-Heston & estimate cond. var.
-            S_h, v_h = simulate_heston(
-                S0, calib["v0"],
-                calib["kappa"], calib["theta"], calib["xi"], calib["rho"],
-                r=0.0, q=0.0,
-                maturities=times,
-                n_steps=len(times)-1,
-                n_paths=10000
-            )
-            cond_var = estimate_conditional_variance(S_h, v_h, strikes, T_index=-1, bandwidth=1.0)
-
-            # 4) build leverage
-            cond_grid = np.tile(cond_var, (len(times), 1))
-            Lf = build_leverage_function(strikes, times, self.sigma_loc, cond_grid)
-
-            # signal completion on main thread
-            self.after(0, lambda: self._calibrate_done(calib, Lf))
-
-        except Exception as e:
-            self.after(0, lambda err=e: messagebox.showerror("Calibration Error", str(err)))
+        strikes_ds, times_ds, iv_ds, S0, _, _, _ = self._calib_inputs
+        self.iv_func = fit_iv_surface(strikes_ds, times_ds, iv_ds)
+        self.sigma_loc = dupire_local_vol(S0, strikes_ds, times_ds, self.iv_func)
+        calib = calibrate_heston(strikes_ds, times_ds, iv_ds, S0, 0.0, 0.0)
+        S_h, v_h = simulate_heston(
+            S0, calib['v0'], calib['kappa'], calib['theta'], calib['xi'], calib['rho'],
+            0.0, 0.0, times_ds, len(times_ds)-1, 10000
+        )
+        cond = estimate_conditional_variance(S_h, v_h, strikes_ds, T_index=-1, bandwidth=1.0)
+        Lf = build_leverage_function(strikes_ds, times_ds, self.sigma_loc, np.tile(cond,(len(times_ds),1)))
+        self.after_cancel(self._timer_id)
+        self.after(0, lambda: self._calibrate_done(calib, Lf))
 
     def _calibrate_done(self, calib, Lf):
-        """
-        Called on main thread when calibration + leverage build finishes.
-        """
-        # stop timer
-        self.after_cancel(self._timer_id)
+        self.heston_params, self.L_func = calib, Lf
         self.result_var.set("Calibration complete")
-
-        # store results
-        self.heston_params = calib
-        self.L_func         = Lf
-        
-        messagebox.showinfo("Calibrate", "Calibration and leverage build complete")
-        # re-enable the Diagnostics button now that we have valid IV data
-
-        # re-enable buttons
         self.fetch_btn.config(state="normal")
         self.calib_btn.config(state="normal")
         self.diag_btn.config(state="normal")
+        messagebox.showinfo("Calibrate", "Done")
 
-    
     def _on_simulate(self):
-        """
-        Run the LSV Monte-Carlo using self.L_func and self.heston_params.
-        Plot the first 20 simulated paths.
-        """
-        if not hasattr(self, "L_func") or not hasattr(self, "heston_params"):
-            messagebox.showwarning("Error", "Please click ‘Calibrate & Build L’ first")
+        if not hasattr(self,'L_func'):
+            messagebox.showwarning("Error", "Calibrate first")
             return
-
-        S0 = self.spot["Close"].iloc[-1]
+        S0 = self.spot['Close'].iloc[-1]
         params = self.heston_params
-        T_final = self.times[-1]
-
-        # simulate LSV
-        self.S_paths, self.v_paths = simulate_lsv(
-            S0,
-            params["v0"],
-            self.L_func,
-            params,
-            r=0.0,
-            q=0.0,
-            T=T_final,
-            n_steps=100,
-            n_paths=5000
+        Ts = self._calib_inputs[1]
+        self.S_paths, _ = simulate_heston(
+            S0, params['v0'], params['kappa'], params['theta'], params['xi'], params['rho'],
+            0.0, 0.0, Ts, 100, 5000
         )
-
-        # plot sample paths
         self.ax.clear()
-        t_grid = np.linspace(0, T_final, 100 + 1)
-        for path in self.S_paths[:20]:
-            self.ax.plot(t_grid, path, linewidth=0.6)
+        t = np.linspace(0, Ts[-1], 101)
+        for p in self.S_paths[:20]:
+            self.ax.plot(t, p, linewidth=0.6)
         self.canvas.draw()
 
     def _on_price(self):
-        """
-        Price the selected derivative on self.S_paths.
-        """
-        if not hasattr(self, "S_paths"):
-            messagebox.showwarning("Error", "Please run ‘Run Simulation’ first")
+        if not hasattr(self,'S_paths'):
+            messagebox.showwarning("Error", "Simulate first")
             return
-
-        prod  = self.prod_cb.get()
-        K     = float(self.strike.get())
-        T     = self.times[-1]
-        discount = np.exp(-0.0 * T)
-
+        prod = self.prod_cb.get()
+        K = float(self.strike.get())
+        T = self._calib_inputs[1][-1]
+        disc = np.exp(-0.0 * T)
         if prod == "European":
-            price = european_price_mc(lambda ST: np.maximum(ST - K, 0.0),
-                                     self.S_paths, discount)
+            price = european_price_mc(lambda ST: np.maximum(ST - K, 0), self.S_paths, disc)
         elif prod == "Barrier":
             B = float(self.barrier.get())
-            price = barrier_price_mc(self.S_paths, K, B,
-                                     is_up=True, is_call=True,
-                                     discount=discount)
-        else:  # Asian
-            price = asian_price_mc(self.S_paths, K,
-                                   is_call=True, discount=discount)
-
+            price = barrier_price_mc(self.S_paths, K, B, True, True, disc)
+        else:
+            price = asian_price_mc(self.S_paths, K, True, disc)
         self.result_var.set(f"Price: {price:.4f}")
-        
+
     def _on_diagnostics(self):
-        # 1) grab stored grid + calib
-        strikes   = self.strikes
-        times     = self.times
-        market_iv = self._last_market_iv
-        calib     = self.heston_params
-        S0        = float(self.spot["Close"].iloc[-1])
-        r, q      = 0.0, 0.0
-
-        # 2) find only the observed points
-        i_valid, j_valid = np.where(~np.isnan(market_iv))
-        if len(i_valid) == 0:
-            messagebox.showerror("Diagnostics", "No valid IV points to compare")
+        if not hasattr(self, 'iv_func'):
+            messagebox.showerror("Diagnostics", "Please click 'Calibrate & Build L' first.")
             return
 
-        # 3) compute model IV & residuals at those points
-        model_vals = []
-        market_vals = []
-        for ii, jj in zip(i_valid, j_valid):
-            T, K = times[ii], strikes[jj]
-            price = heston_price(K, T, S0, r, q, calib)
-            iv_mod = bs_implied_vol(S0, K, T, r, q, price)
-            model_vals.append(iv_mod)
-            market_vals.append(market_iv[ii, jj])
-            
-        model_vals = np.array(model_vals)
-        market_vals = np.array(market_vals)
-            
-        # now drop any pairs where either is NaN
-        good = ~(np.isnan(model_vals) | np.isnan(market_vals))
-        if not np.any(good):
-            messagebox.showerror("Diagnostics", "No valid IV points after filtering NaNs")
+        # Unpack
+        strikes_ds, times_ds, iv_ds, S0, allK, allT, iv_full = self._calib_inputs
+
+        # Slice full IV
+        idxK = [int(np.where(allK == k)[0][0]) for k in strikes_ds]
+        idxT = [int(np.where(allT == t)[0][0]) for t in times_ds]
+        m_iv = iv_full[np.ix_(idxT, idxK)]
+
+        # Compute RMSE over all valid points
+        ivf = self.iv_func
+        model_all  = np.array([ivf(k, t) for t in times_ds for k in strikes_ds])
+        market_all = m_iv.ravel()
+        mask_all   = np.isfinite(model_all) & np.isfinite(market_all)
+        if not np.any(mask_all):
+            messagebox.showerror("Diagnostics", "No valid IV points.")
             return
+        errs_all = model_all[mask_all] - market_all[mask_all]
+        rmse = np.sqrt((errs_all**2).mean())
 
-        model_vals  = model_vals[good]
-        market_vals = market_vals[good]
-        errors      = model_vals - market_vals
+        # Rebuild valid (i,j) pairs for plotting
+        ii_full, jj_full = np.where(~np.isnan(m_iv))
+        valid = [
+            (i, j) for (i, j), keep in zip(zip(ii_full, jj_full), mask_all)
+            if keep
+        ]
+        ii = np.array([i for i, _ in valid])
+        jj = np.array([j for _, j in valid])
 
-        # 4) RMSE and popup
-        rmse = np.sqrt(np.mean(errors**2))
+        # Compute errors for each plotted point
+        errs_plot = np.array([
+            ivf(strikes_ds[j], times_ds[i]) - m_iv[i, j]
+            for i, j in valid
+        ])
+
+        # Plot
+        self.ax.clear()
+        self.ax.set_xlabel("Strike")
+        self.ax.set_ylabel("Maturity")
+        self.ax.set_title(f"IV Fit Error (RMSE {rmse:.2%})")
+        # 2) Auto‐scale axes to the new data
+        self.ax.relim()
+        self.ax.autoscale_view()
+        self.ax.scatter(
+            strikes_ds[jj],
+            times_ds[ii],
+            c=errs_plot,
+            cmap='bwr',
+            vmin=-0.02,
+            vmax=0.02,
+            edgecolors='k',
+            linewidths=0.7,
+            s=60
+        )
+        self.canvas.draw()
         messagebox.showinfo("Diagnostics", f"IV fit RMSE: {rmse:.2%}")
 
-        # 5) scatter-plot residuals only at observed (K,T)
-        plt.figure(figsize=(5,4))
-        sc = plt.scatter(
-            strikes[j_valid], times[i_valid],
-            c=errors, cmap="bwr", vmin=-0.02, vmax=0.02
-        )
-        plt.colorbar(sc, label="Model − Market IV")
-        plt.xlabel("Strike")
-        plt.ylabel("Maturity")
-        plt.title("IV Fit Error (observed quotes only)")
-        plt.show()
-    
     def _update_timer(self):
-        """Update elapsed-time every second."""
         elapsed = int(time.perf_counter() - self._calib_start)
         self.result_var.set(f"Calibrating… {elapsed}s elapsed")
         self._timer_id = self.after(1000, self._update_timer)
 
-
 if __name__ == "__main__":
-    # 1) JIT‐warmup: compile heston_price once
-    from model.heston_calib import heston_price
-    heston_price(
-        100.0, 1.0, 100.0,    # dummy K, T, S0
-        0.01, 0.0,            # dummy r, q
-        {'kappa':1.0, 'theta':0.04, 'xi':0.5, 'rho':-0.5, 'v0':0.04}
-    )
-
-    # 2) Launch the GUI
     app = LSVPricerGUI()
     app.mainloop()
