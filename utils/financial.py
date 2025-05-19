@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.stats import norm
 from scipy.optimize import brentq
+from typing import Dict
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -101,3 +102,44 @@ def bs_implied_vol(
         return np.nan
 
     return iv
+
+
+def bs_greeks(
+    S0: float,
+    K: float,
+    T: float,
+    r: float,
+    q: float,
+    sigma: float,
+) -> Dict[str, float]:
+    """
+    Black–Scholes Greeks for European option:
+      Δ, Γ, Vega, Theta, Rho
+    (for a *call*; for a put, Δ and Θ and Rho adjust via put-call parity)
+    """
+    if T <= 0:
+        return dict(delta=float(S0 > K),
+                    gamma=0.0,
+                    vega=0.0,
+                    theta=0.0,
+                    rho=0.0)
+    sqrtT = np.sqrt(T)
+    d1 = (np.log(S0/K) + (r - q + 0.5*sigma**2)*T) / (sigma*sqrtT)
+    d2 = d1 - sigma*sqrtT
+    pdf_d1 = norm.pdf(d1)
+    cdf_d1 = norm.cdf(d1)
+    cdf_d2 = norm.cdf(d2)
+
+    delta = np.exp(-q*T)*cdf_d1
+    gamma = np.exp(-q*T)*pdf_d1/(S0*sigma*sqrtT)
+    vega  = S0*np.exp(-q*T)*pdf_d1*sqrtT
+    # Theta for call
+    theta = (
+        - (S0*sigma*np.exp(-q*T)*pdf_d1)/(2*sqrtT)
+        - r*K*np.exp(-r*T)*cdf_d2
+        + q*S0*np.exp(-q*T)*cdf_d1
+    )
+    # Rho for call
+    rho = K*T*np.exp(-r*T)*cdf_d2
+
+    return dict(delta=delta, gamma=gamma, vega=vega, theta=theta, rho=rho)

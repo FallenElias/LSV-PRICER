@@ -108,3 +108,17 @@ def asian_price_mc(
     else:
         payoffs = np.maximum(strike - avg, 0.0)
     return discount * np.mean(payoffs)
+
+def geometric_asian_price_mc(S_paths, strike, is_call=True, discount=1.0):
+    """
+    Monte Carlo pricing for Geometric Asian option.
+    Uses the geometric mean of the spot path.
+    """
+    # Exclude initial S0, average over [1:]
+    log_avg = np.mean(np.log(S_paths[:,1:]), axis=1)
+    geo_mean = np.exp(log_avg)
+    if is_call:
+        payoff = np.maximum(geo_mean - strike, 0.0)
+    else:
+        payoff = np.maximum(strike - geo_mean, 0.0)
+    return discount * np.mean(payoff)

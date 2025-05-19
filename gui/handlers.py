@@ -11,7 +11,7 @@ from model.surface      import fit_iv_surface
 from model.local_vol    import dupire_local_vol
 from model.heston_calib import calibrate_heston
 from model.leverage     import simulate_heston, estimate_conditional_variance, build_leverage_function
-from pricing.pricing    import european_price_mc, barrier_price_mc, asian_price_mc
+from utils.financial    import bs_greeks
 
 # ——— 1) Fetch & Clean Data ——————————————————————————————————————
 def plot_history(app):
@@ -146,7 +146,7 @@ def _calib_task(app):
 
     # 2) Dupire local vol
     app.sigma_loc = dupire_local_vol(S0, strikes_ds, times_ds, app.ivf)
-
+    
     # 3) Heston calibration
     calib = calibrate_heston(strikes_ds, times_ds, iv_ds, S0, 0.0, 0.0)
     app.heston_params = calib
@@ -184,21 +184,37 @@ def _calib_done(app):
 # ——— 3) Simulation —————————————————————————————————————————————
 def start_sim(app):
     """
-    Simulate LSV paths to the maturity selected.
-    Reads r,q and maturity, runs simulate_heston, plots on app.plots.sim_tab.
+    Simulate LSV paths to the maturity entered.
+    Reads r, q, and maturity; updates summary labels;
+    runs simulate_heston; plots on the simulation canvas.
     """
+    from tkinter import messagebox
+    import numpy as np
+    from model.leverage import simulate_heston
+
+    # 0) Ensure calibration done
     if not hasattr(app, 'Lfunc'):
         messagebox.showwarning("Simulate", "Please calibrate first")
         return
 
-    # read inputs
+    # 1) Read common inputs
     S0 = float(app.spot['Close'].iloc[-1])
     p  = app.heston_params
-    r  = float(app.ctrl.r.get() or 0.0)
-    q  = float(app.ctrl.q.get() or 0.0)
-    T  = float(app.ctrl.maturity.get())
-    
-        # Validate maturity
+
+    # 2) Read & validate r, q
+    try:
+        r = float(app.ctrl.r.get().strip() or 0.0)
+    except ValueError:
+        messagebox.showerror("Input Error", f"Invalid r: {app.ctrl.r.get()}")
+        return
+
+    try:
+        q = float(app.ctrl.q.get().strip() or 0.0)
+    except ValueError:
+        messagebox.showerror("Input Error", f"Invalid q: {app.ctrl.q.get()}")
+        return
+
+    # 3) Read & validate maturity T
     Tstr = app.ctrl.maturity.get().strip()
     try:
         T = float(Tstr)
@@ -208,23 +224,55 @@ def start_sim(app):
         messagebox.showerror("Input Error", "Please enter a valid positive maturity (in years).")
         return
 
-    # simulate
-    n_steps = 100; n_paths = 100000
+    # 4) Update summary labels now that we know T
+    strikes_ds, times_ds, iv_ds, S0_calib, _, _, _ = app._calib_inputs
+    atm_iv  = app.ivf(S0, T)
+    iK = int(np.argmin(np.abs(strikes_ds - S0)))
+    iT = int(np.argmin(np.abs(times_ds   - T)))
+    atm_loc = app.sigma_loc[iT, iK]
+    
+    # compute BS Greeks at (S0,K=S0,T,r,q,atm_iv)
+    greeks = bs_greeks(S0, S0, T, r=0.0, q=0.0, sigma=atm_iv)
+
+    # stash for UI
+    app._atm_summary = dict(
+    spot=S0,
+    iv=atm_iv,
+    loc=atm_loc,
+    **greeks
+    )
+    
+    s = app._atm_summary
+    app.summary.lbl_spot .config(text=f"{s['spot']:.2f}")
+    app.summary.lbl_iv   .config(text=f"{s['iv']*100:.2f}%")
+    app.summary.lbl_loc  .config(text=f"{s['loc']*100:.2f}%")
+    app.summary.lbl_delta.config(text=f"{s['delta']:.4f}")
+    app.summary.lbl_gamma.config(text=f"{s['gamma']:.6f}")
+    app.summary.lbl_vega .config(text=f"{s['vega']:.2f}")
+    app.summary.lbl_theta.config(text=f"{s['theta']:.4f}")
+    app.summary.lbl_rho  .config(text=f"{s['rho']:.4f}")
+
+    # 5) Run the LSV simulation
+    n_steps = 100
+    n_paths = 100_000
     S_paths, _ = simulate_heston(
         S0, p['v0'], p['kappa'], p['theta'], p['xi'], p['rho'],
-        r, q, np.array([T]), n_steps, n_paths
+        r, q,
+        maturities=np.array([T]),
+        n_steps=n_steps,
+        n_paths=n_paths
     )
     app.S_paths = S_paths
 
-    # plot
+    # 6) Plot first 500 sample paths
     canvas = app.plots.canvas_sim
-    ax = canvas.figure.axes[0]
+    ax     = canvas.figure.axes[0]
     ax.clear()
     ax.set_title("Sample LSV Paths")
     ax.set_xlabel("Time (years)")
     ax.set_ylabel("Spot price")
     t_grid = np.linspace(0, T, n_steps+1)
-    for path in S_paths[:1000]:
+    for path in S_paths[:2000]:
         ax.plot(t_grid, path, linewidth=0.6)
     canvas.draw()
 
@@ -233,78 +281,122 @@ def start_sim(app):
 def do_price(app):
     """
     Price the selected payoff on the simulated LSV paths.
-    Supports European, Barrier (knock‐out), and Asian options,
+    Supports European, Barrier (knock-out), and Asian (Arithmetic & Geometric) options,
     with Call/Put selection, Barrier direction, and Asian style.
     """
     from tkinter import messagebox
-    from pricing.pricing import european_price_mc, barrier_price_mc, asian_price_mc
     import numpy as np
+    import time
+    from pricing.pricing import (
+        european_price_mc,
+        barrier_price_mc,
+        asian_price_mc,
+        geometric_asian_price_mc
+    )
 
-    # Ensure simulation has been run
+    # 0) Ensure simulation has run
     if not hasattr(app, 'S_paths'):
         messagebox.showwarning("Price", "Run simulation first")
         return
-    
-    # Validate maturity
-    Tstr = app.ctrl.maturity.get().strip()
+
+    # 1) Validate inputs
     try:
-        T = float(Tstr)
+        T = float(app.ctrl.maturity.get().strip())
         if T <= 0:
-            raise ValueError
-    except ValueError:
-        messagebox.showerror("Input Error", "Please enter a valid positive maturity (in years).")
+            raise ValueError("Maturity must be positive")
+    except Exception as e:
+        messagebox.showerror("Input Error", f"Invalid maturity: {e}")
         return
 
-    # 1) Read common inputs
-    K    = float(app.ctrl.strike.get())
-    prod = app.ctrl.product.get()
-    is_call = (app.ctrl.opt_type.get() == "Call")
-    r    = float(app.ctrl.r.get() or 0.0)
-    q    = float(app.ctrl.q.get() or 0.0)
-    T    = float(app.ctrl.maturity.get())
+    try:
+        r = float(app.ctrl.r.get().strip() or 0.0)
+        q = float(app.ctrl.q.get().strip() or 0.0)
+    except Exception as e:
+        messagebox.showerror("Input Error", f"Invalid rate: {e}")
+        return
+
+    try:
+        K = float(app.ctrl.strike.get())
+    except Exception:
+        messagebox.showerror("Input Error", "Invalid strike")
+        return
+
+    prod     = app.ctrl.product.get()
+    is_call  = (app.ctrl.opt_type.get() == "Call")
     discount = np.exp(-r * T)
 
-    # 2) Price by product
+    # 2) Initialize extra info
+    barrier_dir = ""
+    asian_style = ""
+
+    # 3) Compute price
     if prod == "European":
-        # payoff is call or put
-        if is_call:
-            payoff = lambda ST: np.maximum(ST - K, 0.0)
-        else:
-            payoff = lambda ST: np.maximum(K - ST, 0.0)
+        payoff = (lambda ST: np.maximum(ST - K, 0.0)) if is_call \
+               else (lambda ST: np.maximum(K - ST, 0.0))
         price = european_price_mc(payoff, app.S_paths, discount)
 
     elif prod == "Barrier":
-        # barrier level + direction
-        B = float(app.ctrl.barrier.get())
-        bd = app.ctrl.barrier_dir.get()  # e.g. "Up-and-Out"
-        is_up  = "Up" in bd
-        is_out = "Out" in bd
-        # note: barrier_price_mc implements knock‐out; for knock‐in you could
-        # use parity: price_KI = euro_price - price_KO
+        try:
+            B = float(app.ctrl.barrier.get())
+        except Exception:
+            messagebox.showerror("Input Error", "Invalid barrier level")
+            return
+
+        bd = app.ctrl.barrier_dir.get()
+        is_up = "Up" in bd
         price = barrier_price_mc(
-            S_paths = app.S_paths,
-            strike  = K,
-            barrier = B,
-            is_up   = is_up,
-            is_call = is_call,
-            discount= discount
+            S_paths  = app.S_paths,
+            strike   = K,
+            barrier  = B,
+            is_up    = is_up,
+            is_call  = is_call,
+            discount = discount
         )
+        barrier_dir = bd
 
-    else:  # Asian
-        style = app.ctrl.asian.get()  # "Arithmetic" or "Geometric"
-        # pricing.pricing only implements arithmetic; geometric would need new formula
-        if style != "Arithmetic":
-            messagebox.showwarning("Pricing", "Geometric-Asian not implemented, defaulting to Arithmetic")
-        price = asian_price_mc(
-            S_paths = app.S_paths,
-            strike  = K,
-            is_call = is_call,
-            discount= discount
-        )
+    elif prod == "Asian":
+        style = app.ctrl.asian.get()
+        asian_style = style
 
-    # 3) Display result
+        if style == "Arithmetic":
+            price = asian_price_mc(
+                S_paths  = app.S_paths,
+                strike   = K,
+                is_call  = is_call,
+                discount = discount
+            )
+        elif style == "Geometric":
+            price = geometric_asian_price_mc(
+                S_paths  = app.S_paths,
+                strike   = K,
+                is_call  = is_call,
+                discount = discount
+            )
+        else:
+            messagebox.showerror("Input Error", f"Unknown Asian style: {style}")
+            return
+    else:
+        messagebox.showerror("Input Error", f"Unsupported product: {prod}")
+        return
+
+    # 4) Display result
     app.ctrl.status.set(f"Price: {price:.4f}")
 
+    # 5) Log to history (latest on top)
+    app.history.insert(
+        parent="",
+        index=0,
+        iid=None,
+        values=(
+            prod,
+            "Call" if is_call else "Put",
+            f"{K:.1f}",
+            f"{T:.3f}",
+            barrier_dir,
+            asian_style,
+            f"{price:.4f}"
+        )
+    )
 
 
 # ——— 5) Diagnostics ——————————————————————————————————————————————
