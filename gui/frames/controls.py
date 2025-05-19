@@ -85,6 +85,11 @@ class ControlPanel(ttk.Frame):
 
         # initial hide/show
         self._on_product_change()
+        
+        # Add at the end of __init__ in gui/frames/controls.py
+        self.use_offline = tk.BooleanVar()
+        ttk.Checkbutton(self, text="Offline mode (CSV)", variable=self.use_offline).grid(row=1+row, column=0, columnspan=2, sticky="w")
+
 
 
     def _on_product_change(self, event=None):

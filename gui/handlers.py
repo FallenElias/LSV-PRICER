@@ -3,6 +3,7 @@
 import threading
 import time
 import numpy as np
+import pandas as pd
 from tkinter import messagebox
 from matplotlib.dates import DateFormatter
 
@@ -51,40 +52,50 @@ def plot_market_smile(app):
 
 def start_fetch(app):
     """
-    Read ticker, r, q from the control panel.
-    Download spot history and option quotes, then clean them.
-    Store in app.spot and app.opts.
+    Fetch spot and option data.
+    If 'Offline Mode' checkbox is ticked, load CSVs instead of fetching online.
     """
-    ticker = app.ctrl.ticker.get().upper()
+
+    offline = bool(app.ctrl.use_offline.get())  # read checkbox
+
     try:
-        # Spot history
-        app.spot = fetch_spot_history(ticker, years=3)
-        S0 = float(app.spot['Close'].iloc[-1])
-        # Options with mid_iv
-        r = float(app.ctrl.r.get() or 0.0)
-        q = float(app.ctrl.q.get() or 0.0)
-        raw = fetch_option_quotes(ticker, S0, r, q)
-        app.opts = clean_option_quotes(raw)
-        messagebox.showinfo("Data", f"Loaded {len(app.spot)} spot rows and {len(app.opts)} option quotes")
-        # in start_fetch, after cleaning opts:
+        if offline:
+            # Load offline CSVs
+            app.spot = pd.read_csv("spot.csv", parse_dates=["date"])
+            app.opts = pd.read_csv("options.csv", parse_dates=["expiry"])
+            messagebox.showinfo("Offline Mode", f"Loaded offline data: {len(app.spot)} spot rows, {len(app.opts)} option quotes")
+        else:
+            # Online fetch
+            from data.loader import fetch_spot_history, fetch_option_quotes, clean_option_quotes
+            ticker = app.ctrl.ticker.get().upper()
+            app.spot = fetch_spot_history(ticker, years=3)
+            S0 = float(app.spot['Close'].iloc[-1])
+            r = float(app.ctrl.r.get() or 0.0)
+            q = float(app.ctrl.q.get() or 0.0)
+            raw = fetch_option_quotes(ticker, S0, r, q)
+            app.opts = clean_option_quotes(raw)
+            messagebox.showinfo("Data", f"Loaded {len(app.spot)} spot rows and {len(app.opts)} option quotes")
+
+        # Precompute IV surface for diagnostics and smile plotting
         spot_date = app.spot['date'].iloc[-1]
         exp_days  = (app.opts['expiry'] - spot_date).dt.days
-        times_full   = np.unique(exp_days/365.0)
+        times_full   = np.unique(exp_days / 365.0)
         strikes_full = np.sort(app.opts['strike'].unique())
         iv_full = np.full((len(times_full), len(strikes_full)), np.nan)
-        for i,T in enumerate(times_full):
-            df = app.opts[np.isclose(exp_days/365.0, T)]
-            iv_full[i,:] = df.groupby('strike')['mid_iv'].mean().reindex(strikes_full).values
+        for i, T in enumerate(times_full):
+            df = app.opts[np.isclose(exp_days / 365.0, T)]
+            iv_full[i, :] = df.groupby('strike')['mid_iv'].mean().reindex(strikes_full).values
 
-        # store for later
         app.times_full   = times_full
         app.strikes_full = strikes_full
         app.iv_full      = iv_full
 
-        # then call:
+        # Plot
         plot_market_smile(app)
-        plot_history(app)            
-        app.ctrl.status.set("Fetch successful")
+        plot_history(app)
+
+        app.ctrl.status.set("Fetch successful (offline)" if offline else "Fetch successful")
+
     except Exception as e:
         messagebox.showerror("Fetch Error", str(e))
 
