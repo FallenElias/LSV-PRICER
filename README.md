@@ -1,6 +1,6 @@
 # Local Stochastic Volatility (LSV) Option Pricer GUI
 
-This application provides a full-featured interface for pricing equity options using a Local Stochastic Volatility (LSV) model calibrated from real market data. It supports simulation and pricing of European, Barrier, and Asian options, with visualization of smile/skew, local volatility, and Greeks.
+This application provides a full-featured interface for pricing american equity options using a Local Stochastic Volatility (LSV) model calibrated from real market data. It supports simulation and pricing of European, Barrier, and Asian options, with visualization of smile/skew, local volatility, and Greeks.
 
 ---
 
