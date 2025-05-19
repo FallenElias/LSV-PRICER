@@ -36,7 +36,7 @@ This application provides a full-featured interface for pricing american equity 
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/lsv-option-pricer.git
+git clone https://github.com/FallenElias/LSV-PRICER.git
 cd lsv-option-pricer
 ```
 
