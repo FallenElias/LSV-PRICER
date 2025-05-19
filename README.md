@@ -77,18 +77,24 @@ lsv-option-pricer/
 │   └── main.py               # Main application launcher
 |
 ├── model/
+│   ├── __init__.py          
 │   ├── local_vol.py          # Dupire local volatility
+│   ├── mc_engine.py          # Monte-Carlo simulator
 │   ├── heston_calib.py       # Heston model calibration
 │   ├── leverage.py           # Build leverage function L(S,t)
 │   └── surface.py            # IV surface interpolation
 |
 ├── pricing/
+│   ├── __init__.py
+│   ├── diagnostics.py        # Calculating RMSE between Model IV and Market IV
 │   └── pricing.py            # Monte Carlo pricers (European, Barrier, Asian)
 |
 ├── data/
+│   ├── __init__.py
 │   └── loader.py             # Data fetching and cleaning functions
 |
 ├── utils/
+│   ├── __init__.py
 │   └── financial.py          # BS formulas, implied vol, greeks, helpers
 |
 ├── spot.csv                  # [Optional] Offline spot price backup
