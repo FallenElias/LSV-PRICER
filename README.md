@@ -166,6 +166,101 @@ The Greeks are computed using the Black-Scholes model at the ATM point with the 
 
 ---
 
+Here's a **complete user guide** section for your README file, written in a professional format, ready to be copy-pasted:
+
+---
+
+## User Guide
+
+This section describes how to use the LSV Pricer application from launch to full option pricing.
+
+### 1. Launching the Application
+
+Ensure your virtual environment is activated, then run:
+
+```bash
+python -m gui.main
+```
+
+The application window will open with the following panels:
+
+* **Control Panel** (left): input parameters and controls
+* **Simulation and Diagnostics Panel** (right): displays plots
+* **Summary Panel** (center): key metrics (spot, volatility, Greeks)
+* **History Table** (bottom): recent pricing requests
+
+---
+
+### 2. Step-by-Step Usage
+
+#### A. Fetch Market Data
+
+* Enter a **ticker symbol** (e.g., `AAPL`)
+* Set **risk-free rate** `r` and **dividend yield** `q`
+* (Optional) Tick `Offline Mode` if no internet; ensure `spot.csv` and `options.csv` are in the project folder
+* Click **"Fetch & Clean"**
+* Spot history and implied volatility surface will be loaded and plotted
+
+#### B. Calibrate the Model
+
+* Click **"Calibrate & Build L"**
+* The app will:
+
+  * Fit the implied volatility surface
+  * Compute the Dupire local volatility surface
+  * Calibrate the Heston model
+  * Build the leverage function
+* ATM values and summary metrics will be shown in the center panel
+
+#### C. Configure Product Parameters
+
+* Choose **maturity** (in years), **strike**, **option type** (Call or Put)
+* Select **product type**:
+
+  * **European**
+  * **Barrier** (specify barrier level and direction: Up-and-Out, Down-and-Out, etc.)
+  * **Asian** (choose Arithmetic or Geometric)
+* Additional fields will appear dynamically based on product type
+
+#### D. Simulate Paths
+
+* Click **"Run Simulation"**
+* The system will:
+
+  * Simulate 100,000 LSV paths
+  * Display 1000 sample paths in the Simulation panel
+  * Compute and display spot, ATM implied/local vol, and Black-Scholes Greeks
+
+#### E. Price the Option
+
+* Click **"Price"**
+* The app will compute the Monte Carlo price using the configured parameters
+* Result will be shown in the status bar and appended to the history table
+
+---
+
+### 3. Viewing Diagnostics
+
+* Diagnostics (volatility fit error) are computed automatically after calibration
+* The Diagnostics tab visualizes the RMSE between fitted IV surface and market data
+
+---
+
+### 4. Exporting & Offline Mode
+
+To fetch data for **offline usage**:
+
+```python
+spot.to_csv("spot.csv", index=False)
+opts.to_csv("options.csv", index=False)
+```
+
+Then, enable `Offline Mode` in the app. The system will load from CSV instead of querying online APIs.
+
+
+---
+
+
 ## 🧬 Notes & Limitations
 
 * Greeks are Black-Scholes based, not from the LSV model.
