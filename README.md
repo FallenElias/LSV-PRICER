@@ -2,6 +2,8 @@
 
 This application provides a full-featured interface for pricing options on american equity using a Local Stochastic Volatility (LSV) model calibrated from real market data. It supports simulation and pricing of European, Barrier, and Asian options, with visualization of smile/skew, local volatility, and Greeks.
 
+## Authors : Elias Dève, Arnaud Ferrand
+
 ---
 
 ## 🧠 Key Features
