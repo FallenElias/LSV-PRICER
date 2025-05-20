@@ -1,6 +1,6 @@
 # Local Stochastic Volatility (LSV) Option Pricer GUI
 
-This application provides a full-featured interface for pricing american equity options using a Local Stochastic Volatility (LSV) model calibrated from real market data. It supports simulation and pricing of European, Barrier, and Asian options, with visualization of smile/skew, local volatility, and Greeks.
+This application provides a full-featured interface for pricing options on american equity using a Local Stochastic Volatility (LSV) model calibrated from real market data. It supports simulation and pricing of European, Barrier, and Asian options, with visualization of smile/skew, local volatility, and Greeks.
 
 ---
 
@@ -166,10 +166,6 @@ The Greeks are computed using the Black-Scholes model at the ATM point with the 
 
 ---
 
-Here's a **complete user guide** section for your README file, written in a professional format, ready to be copy-pasted:
-
----
-
 ## User Guide
 
 This section describes how to use the LSV Pricer application from launch to full option pricing.
@@ -195,7 +191,7 @@ The application window will open with the following panels:
 
 #### A. Fetch Market Data
 
-* Enter a **ticker symbol** (e.g., `AAPL`)
+* Enter an **american ticker symbol** (e.g., `AAPL`) Verify that market aren't close if you don't want to work offline mode
 * Set **risk-free rate** `r` and **dividend yield** `q`
 * (Optional) Tick `Offline Mode` if no internet; ensure `spot.csv` and `options.csv` are in the project folder
 * Click **"Fetch & Clean"**
