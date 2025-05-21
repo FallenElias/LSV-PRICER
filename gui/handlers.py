@@ -103,50 +103,61 @@ def start_fetch(app):
 # ——— 2) Calibrate & Build Leverage —————————————————————————————
 def start_calib(app):
     """
-    Down-sample IV grid to 7×5 strikes×maturities,
-    fit IV surface, local-vol, Heston calib, simulate & build L.
+    Down-sample IV grid to 7×5 strikes×maturities near ATM and short-term T.
+    Fit IV surface, Dupire local vol, calibrate Heston, simulate Heston paths, and build L.
     Runs in background thread.
     """
-    # disable buttons to prevent reentry
+
+    # 0) Disable buttons to prevent UI reentry
     app.ctrl.fetch_btn.config(state="disabled")
     app.ctrl.calib_btn.config(state="disabled")
 
-    # unpack spot & opts
+    # 1) Extract relevant market data
     spot_date = app.spot['date'].iloc[-1]
     S0 = float(app.spot['Close'].iloc[-1])
     exp_days = (app.opts['expiry'] - spot_date).dt.days
-    times_full   = np.unique(exp_days / 365.0)
+    times_full = np.unique(exp_days / 365.0)
     strikes_full = np.sort(app.opts['strike'].unique())
 
-    # build full market IV matrix
+    # 2) Remove short expiries
+    filtered = times_full[times_full > (20 / 365)]
+    if len(filtered) < 5:
+        messagebox.showwarning("Calibrate", "Not enough maturities > 20 days. Aborting.")
+        return
+    times_full = filtered
+
+    # 3) Build full IV surface grid
     iv_full = np.full((len(times_full), len(strikes_full)), np.nan)
     for i, T in enumerate(times_full):
-        slice_df = app.opts[np.isclose(exp_days/365.0, T)]
-        iv_full[i,:] = slice_df.groupby('strike')['mid_iv'].mean().reindex(strikes_full).values
+        df_T = app.opts[np.isclose(exp_days / 365.0, T)]
+        iv_row = df_T.groupby('strike')['mid_iv'].mean()
+        iv_full[i, :] = iv_row.reindex(strikes_full).values
 
-    # down-sample indices
-    M,N    = len(strikes_full), len(times_full)
-    idx_K  = np.linspace(0, M-1, min(7,M), dtype=int)
-    idx_T  = np.linspace(0, N-1, min(5,N), dtype=int)
+    # 4) Pick 7 strikes closest to S0
+    idx_K = np.argsort(np.abs(strikes_full - S0))[:7]
+    idx_K.sort()
     strikes_ds = strikes_full[idx_K]
-    times_ds   = times_full[idx_T]
-    iv_ds      = iv_full[np.ix_(idx_T, idx_K)]
 
-    # store for later
-    app._calib_inputs = (strikes_ds, times_ds, iv_ds, S0, strikes_full, times_full, iv_full)
+    # 5) Pick 5 maturities closest to T=30/365
+    target_T = 30 / 365
+    idx_T = np.argsort(np.abs(times_full - target_T))[:5]
+    idx_T.sort()
+    times_ds = times_full[idx_T]
 
-    # populate maturity combobox
-    #app.ctrl.maturity.config(values=[f"{t:.6f}" for t in times_ds])
-    #app.ctrl.maturity.current(len(times_ds)-1)
+    iv_ds = iv_full[np.ix_(idx_T, idx_K)]
 
-    # start timer
+    # 6) Store calibration inputs
+    app._calib_inputs = (
+        strikes_ds, times_ds, iv_ds,
+        S0, strikes_full, times_full, iv_full
+    )
+
+
+    # 8) Launch background calibration thread
     app._calib_start = time.perf_counter()
     app.ctrl.status.set("Calibrating… 0s elapsed")
     app._timer_id = app.after(1000, lambda: _update_timer(app))
-
-    # background work
-    thread = threading.Thread(target=_calib_task, args=(app,), daemon=True)
-    thread.start()
+    threading.Thread(target=_calib_task, args=(app,), daemon=True).start()
 
 
 def _calib_task(app):
